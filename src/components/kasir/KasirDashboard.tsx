@@ -3,8 +3,11 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlarmClock,
   ArrowRightLeft,
   Bell,
+  BellOff,
+  BellRing,
   Clock,
   Coffee,
   Lock,
@@ -30,6 +33,15 @@ import {
   formatPromoShortTag,
   getBestTablePromoForTable,
 } from "@/lib/promo-discounts";
+import {
+  getBrowserNotificationPermission,
+  playBookingNotificationChime,
+  playOvertimeAlarmSound,
+  requestBrowserNotificationPermission,
+  triggerBrowserNotification,
+  unlockKasirAudio,
+  type BrowserNotifPermission,
+} from "@/lib/kasir-alarm";
 import type { BilliardTable, TableCategory, TableStatus } from "@/types/database";
 import type {
   KasirActiveSession,
@@ -50,6 +62,8 @@ interface KasirDashboardProps {
   initialData: KasirDashboardData;
 }
 
+const OVERTIME_ALARM_REPEAT_MS = 25_000; // Bunyikan ulang tiap 25 detik sampai dimatikan / dibayar
+
 function formatSecondsHMS(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
   const h = Math.floor(safe / 3600);
@@ -68,46 +82,13 @@ function formatTargetEndWib(startIso: string, durationMinutes: number): string {
   }).format(new Date(endMs));
 }
 
-function playNotificationChime() {
-  try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const notes = [880, 1174.66];
-    notes.forEach((freq, idx) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.001, ctx.currentTime + idx * 0.14);
-      gain.gain.exponentialRampToValueAtTime(
-        0.18,
-        ctx.currentTime + idx * 0.14 + 0.02,
-      );
-      gain.gain.exponentialRampToValueAtTime(
-        0.001,
-        ctx.currentTime + idx * 0.14 + 0.28,
-      );
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(ctx.currentTime + idx * 0.14);
-      osc.stop(ctx.currentTime + idx * 0.14 + 0.3);
-    });
-  } catch {
-    // Abaikan jika autoplay diblokir browser
-  }
-}
-
 function getCardStatusAccent(status: TableStatus, isOvertime: boolean) {
   if (isOvertime) {
     return {
       bar: "bg-status-occupied animate-pulse",
       badge:
         "border-status-occupied/50 bg-status-occupied text-white animate-pulse",
-      border: "border-status-occupied/80 ring-2 ring-status-occupied/30",
+      border: "border-status-occupied/80 ring-2 ring-status-occupied/35",
     };
   }
   switch (status) {
@@ -140,6 +121,11 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [notifPermission, setNotifPermission] =
+    useState<BrowserNotifPermission>("default");
+  const [mutedOvertimeIds, setMutedOvertimeIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [categoryFilter, setCategoryFilter] = useState<"all" | TableCategory>(
     "all",
   );
@@ -175,15 +161,24 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
+  // Pelacak alarm per sesi overtime agar tidak spam tiap detik & bisa diulang tiap 25 detik
+  const lastAlarmFiredAtRef = useRef<Map<string, number>>(new Map());
+  const browserNotifiedIdsRef = useRef<Set<string>>(new Set());
+
   const showToast = useCallback(
     (type: "info" | "error" | "success", message: string) => {
       setToast({ type, message });
       window.setTimeout(() => {
         setToast((prev) => (prev?.message === message ? null : prev));
-      }, 4000);
+      }, 4500);
     },
     [],
   );
+
+  // Baca status izin Notifikasi Browser saat mount
+  useEffect(() => {
+    setNotifPermission(getBrowserNotificationPermission());
+  }, []);
 
   // Ticker 1 detik untuk timer real-time di semua kartu meja
   useEffect(() => {
@@ -233,8 +228,13 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
             };
             if (created.status === "pending") {
               if (soundEnabledRef.current) {
-                playNotificationChime();
+                playBookingNotificationChime();
               }
+              triggerBrowserNotification({
+                title: "🎱 Booking Web Baru Masuk!",
+                body: `Booking baru dari ${created.customer_name ?? "Pelanggan"} menunggu konfirmasi kasir.`,
+                tag: `booking-new-${Date.now()}`,
+              });
               showToast(
                 "info",
                 `Booking web baru masuk dari ${created.customer_name ?? "Pelanggan"}!`,
@@ -266,7 +266,12 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
     [data.activeSessions],
   );
 
-  // Semua booking confirmed hari ini per meja (untuk cek antrean berikutnya & blokir tambah jam)
+  const tableById = useMemo(
+    () => new Map(data.tables.map((t) => [t.id, t])),
+    [data.tables],
+  );
+
+  // Semua booking confirmed hari ini per meja (untuk blokir tambah jam)
   const confirmedBookingsByTableId = useMemo(() => {
     const map = new Map<string, KasirBookingItem[]>();
     for (const b of data.confirmedTodayBookings) {
@@ -287,6 +292,173 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
     }
     return map;
   }, [data.confirmedTodayBookings]);
+
+  // Daftar seluruh sesi Paket Jam yang waktunya sudah HABIS (remainingSec <= 0)
+  const overtimeAlerts = useMemo(() => {
+    const list: Array<{
+      table: BilliardTable;
+      session: KasirActiveSession;
+      overtimeSec: number;
+      extendBlocked: boolean;
+    }> = [];
+
+    for (const session of data.activeSessions) {
+      if (session.billing_mode !== "package") continue;
+      const table = tableById.get(session.table_id);
+      if (!table) continue;
+
+      const startMs = new Date(session.start_time).getTime();
+      const elapsedSec = Math.max(0, Math.floor((nowMs - startMs) / 1000));
+      const totalSec = session.duration_minutes * 60;
+      const remainingSec = totalSec - elapsedSec;
+
+      if (remainingSec <= 0) {
+        const tableConfirmed = confirmedBookingsByTableId.get(table.id) ?? [];
+        const constraint = getSessionExtendConstraint(
+          session.start_time,
+          session.duration_minutes,
+          tableConfirmed,
+          session.booking_id,
+          4,
+        );
+        list.push({
+          table,
+          session,
+          overtimeSec: Math.abs(remainingSec),
+          extendBlocked: constraint.maxAddableHours === 0,
+        });
+      }
+    }
+
+    return list.sort((a, b) => a.table.sort_order - b.table.sort_order);
+  }, [confirmedBookingsByTableId, data.activeSessions, nowMs, tableById]);
+
+  // Mesin Alarm & Notifikasi Waktu Habis (otomatis berbunyi saat 00:00:00 & ulang tiap 25 dtk)
+  useEffect(() => {
+    const activeOvertimeIds = new Set(overtimeAlerts.map((a) => a.session.id));
+
+    // Bersihkan tracker jika sesi sudah dibayar atau baru saja ditambah jamnya
+    for (const trackedId of Array.from(lastAlarmFiredAtRef.current.keys())) {
+      if (!activeOvertimeIds.has(trackedId)) {
+        lastAlarmFiredAtRef.current.delete(trackedId);
+      }
+    }
+    for (const notifiedId of Array.from(browserNotifiedIdsRef.current)) {
+      if (!activeOvertimeIds.has(notifiedId)) {
+        browserNotifiedIdsRef.current.delete(notifiedId);
+      }
+    }
+    setMutedOvertimeIds((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of prev) {
+        if (!activeOvertimeIds.has(id)) {
+          next.delete(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+
+    if (overtimeAlerts.length === 0) return;
+
+    let shouldRingAlarm = false;
+
+    for (const item of overtimeAlerts) {
+      const sid = item.session.id;
+
+      // 1. Notifikasi Browser & Toast seketika pertama kali meja mencapai 00:00:00
+      if (!browserNotifiedIdsRef.current.has(sid)) {
+        browserNotifiedIdsRef.current.add(sid);
+        triggerBrowserNotification({
+          title: `⏰ WAKTU HABIS — ${item.table.name}!`,
+          body: `Sesi Paket ${item.session.customer_name} di ${item.table.name} telah habis. Segera selesaikan atau tambah jam.`,
+          tag: `overtime-${sid}`,
+        });
+        showToast(
+          "error",
+          `⏰ WAKTU HABIS! ${item.table.name} (${item.session.customer_name}) — segera selesaikan atau tambah jam.`,
+        );
+      }
+
+      // 2. Bunyikan alarm (langsung saat pertama kali & ulang tiap 25 detik jika belum dimatikan)
+      if (!soundEnabled || mutedOvertimeIds.has(sid)) continue;
+      const lastFired = lastAlarmFiredAtRef.current.get(sid) ?? 0;
+      if (nowMs - lastFired >= OVERTIME_ALARM_REPEAT_MS) {
+        lastAlarmFiredAtRef.current.set(sid, nowMs);
+        shouldRingAlarm = true;
+      }
+    }
+
+    if (shouldRingAlarm) {
+      playOvertimeAlarmSound();
+    }
+  }, [mutedOvertimeIds, nowMs, overtimeAlerts, showToast, soundEnabled]);
+
+  const handleToggleBrowserNotifications = async () => {
+    unlockKasirAudio();
+    const current = getBrowserNotificationPermission();
+    if (current === "unsupported") {
+      showToast(
+        "info",
+        "Browser ini belum mendukung Notifikasi Sistem, tetapi alarm suara & banner merah tetap aktif.",
+      );
+      return;
+    }
+    if (current === "granted") {
+      triggerBrowserNotification({
+        title: "✅ Notifikasi Kasir Onesticx Aktif",
+        body: "Anda akan mendapat pemberitahuan otomatis saat waktu meja habis atau ada booking baru.",
+        tag: "notif-test",
+      });
+      showToast("success", "Notifikasi browser sudah aktif!");
+      return;
+    }
+    const result = await requestBrowserNotificationPermission();
+    setNotifPermission(result);
+    if (result === "granted") {
+      triggerBrowserNotification({
+        title: "✅ Notifikasi Kasir Onesticx Aktif",
+        body: "Alarm waktu habis meja dan booking baru akan langsung muncul di layar.",
+        tag: "notif-enabled",
+      });
+      showToast("success", "Notifikasi browser berhasil diaktifkan!");
+    } else if (result === "denied") {
+      showToast(
+        "error",
+        "Izin notifikasi ditolak browser. Aktifkan lewat ikon gembok di bilah alamat browser.",
+      );
+    }
+  };
+
+  const handleTestAlarm = () => {
+    unlockKasirAudio();
+    playOvertimeAlarmSound();
+    triggerBrowserNotification({
+      title: "⏰ Tes Alarm — Kasir 1St!cx Billiard",
+      body: "Suara alarm dan notifikasi waktu habis meja berfungsi normal!",
+      tag: "alarm-test",
+    });
+    showToast("info", "Tes suara alarm waktu habis dibunyikan!");
+  };
+
+  const handleMuteOvertimeSession = (sessionId: string) => {
+    setMutedOvertimeIds((prev) => {
+      const next = new Set(prev);
+      next.add(sessionId);
+      return next;
+    });
+  };
+
+  const handleMuteAllOvertime = () => {
+    setMutedOvertimeIds((prev) => {
+      const next = new Set(prev);
+      for (const item of overtimeAlerts) {
+        next.add(item.session.id);
+      }
+      return next;
+    });
+  };
 
   const availableTables = useMemo(
     () =>
@@ -385,6 +557,10 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
     }
   };
 
+  const hasUnmutedOvertime = overtimeAlerts.some(
+    (item) => !mutedOvertimeIds.has(item.session.id),
+  );
+
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       {/* Shared Top Navigation Bar */}
@@ -407,20 +583,59 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
               )}
             </button>
 
+            {/* Tombol Izin Notifikasi Browser */}
             <button
               type="button"
-              onClick={() => setSoundEnabled((v) => !v)}
+              onClick={() => void handleToggleBrowserNotifications()}
+              title={
+                notifPermission === "granted"
+                  ? "Notifikasi browser aktif (klik untuk tes)"
+                  : "Aktifkan notifikasi browser saat waktu habis"
+              }
+              className={`flex min-h-[48px] items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition ${
+                notifPermission === "granted"
+                  ? "border-status-available/40 bg-status-available/10 text-status-available"
+                  : "border-border bg-background text-muted hover:border-primary/60 hover:text-foreground"
+              }`}
+            >
+              {notifPermission === "granted" ? (
+                <BellRing className="h-4 w-4" />
+              ) : (
+                <BellOff className="h-4 w-4" />
+              )}
+              <span className="hidden xl:inline">
+                {notifPermission === "granted" ? "Notif Aktif" : "Aktifkan Notif"}
+              </span>
+            </button>
+
+            {/* Tombol Tes Alarm (Memudahkan Uji Volume Speaker Tablet) */}
+            <button
+              type="button"
+              onClick={handleTestAlarm}
+              title="Uji bunyi alarm waktu habis"
+              className="hidden min-h-[48px] items-center gap-1.5 rounded-xl border border-border bg-background px-3 text-xs font-bold text-foreground transition hover:border-primary/60 hover:text-primary sm:flex"
+            >
+              <AlarmClock className="h-4 w-4 text-primary" />
+              <span className="hidden xl:inline">Tes Alarm</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                unlockKasirAudio();
+                setSoundEnabled((v) => !v);
+              }}
               title={
                 soundEnabled
-                  ? "Matikan suara notifikasi booking"
-                  : "Aktifkan suara notifikasi booking"
+                  ? "Matikan semua suara alarm & notifikasi"
+                  : "Aktifkan suara alarm & notifikasi"
               }
               className="flex min-h-[48px] min-w-[48px] items-center justify-center rounded-xl border border-border bg-background text-foreground transition hover:border-primary/60"
             >
               {soundEnabled ? (
                 <Volume2 className="h-5 w-5 text-status-available" />
               ) : (
-                <VolumeX className="h-5 w-5 text-muted" />
+                <VolumeX className="h-5 w-5 text-status-occupied" />
               )}
             </button>
 
@@ -458,6 +673,112 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
       {/* Main Split Layout (Tablet Landscape: Grid Meja + Panel Antrean Samping) */}
       <div className="flex flex-1 overflow-hidden">
         <main className="flex-1 overflow-y-auto p-4 lg:p-5">
+          {/* Banner Alarm Peringatan Waktu Habis (Otomatis muncul saat ada meja 00:00:00) */}
+          {overtimeAlerts.length > 0 && (
+            <section
+              role="alert"
+              className="mb-4 rounded-2xl border-2 border-status-occupied bg-status-occupied/15 p-4 shadow-lg shadow-status-occupied/20"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-status-occupied/30 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-status-occupied text-white">
+                    <AlarmClock
+                      className={`h-6 w-6 ${hasUnmutedOvertime && soundEnabled ? "animate-bounce" : ""}`}
+                    />
+                  </div>
+                  <div>
+                    <p className="font-heading text-lg font-bold uppercase tracking-wide text-status-occupied">
+                      Alarm Waktu Habis ({overtimeAlerts.length} Meja)
+                    </p>
+                    <p className="text-xs text-foreground/85">
+                      {hasUnmutedOvertime && soundEnabled
+                        ? "Alarm otomatis berbunyi ulang tiap 25 detik hingga diselesaikan atau dimatikan."
+                        : "Alarm suara untuk meja di bawah sedang disenyapkan."}
+                    </p>
+                  </div>
+                </div>
+
+                {hasUnmutedOvertime && soundEnabled && (
+                  <button
+                    type="button"
+                    onClick={handleMuteAllOvertime}
+                    className="flex min-h-[48px] items-center gap-2 rounded-xl bg-status-occupied px-4 text-xs font-extrabold uppercase tracking-wide text-white transition hover:brightness-110 active:scale-95"
+                  >
+                    <VolumeX className="h-4 w-4" />
+                    <span>Matikan Semua Alarm</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="mt-3 space-y-2.5">
+                {overtimeAlerts.map(
+                  ({ table, session, overtimeSec, extendBlocked }) => {
+                    const isMuted = mutedOvertimeIds.has(session.id);
+                    return (
+                      <div
+                        key={session.id}
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-status-occupied/40 bg-background/90 px-3.5 py-2.5"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-heading text-lg font-bold text-foreground">
+                              {table.name}
+                            </span>
+                            <span className="text-xs font-semibold text-muted">
+                              • {session.customer_name}
+                            </span>
+                            <span className="tabular-timer rounded-md bg-status-occupied/20 px-2 py-0.5 text-xs font-extrabold text-status-occupied">
+                              Lewat +{formatSecondsHMS(overtimeSec)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          {!isMuted && soundEnabled && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMuteOvertimeSession(session.id)
+                              }
+                              className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-status-occupied/50 bg-surface px-3 text-xs font-bold text-status-occupied hover:bg-status-occupied hover:text-white"
+                            >
+                              <VolumeX className="h-4 w-4" />
+                              <span>Diamkan</span>
+                            </button>
+                          )}
+
+                          {!extendBlocked && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExtendModalTarget({ table, session })
+                              }
+                              className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-border bg-surface px-3 text-xs font-bold text-foreground hover:border-primary/60 hover:text-primary"
+                            >
+                              <Plus className="h-4 w-4" />
+                              <span>Tambah Jam</span>
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCheckoutModalTarget({ table, session })
+                            }
+                            className="flex min-h-[44px] items-center gap-1.5 rounded-xl bg-primary px-3.5 text-xs font-bold text-white hover:bg-primary-hover"
+                          >
+                            <Receipt className="h-4 w-4" />
+                            <span>Selesai &amp; Bayar</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  },
+                )}
+              </div>
+            </section>
+          )}
+
           {/* Strip Ringkasan & Filter Kategori */}
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -512,7 +833,6 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
               const tableConfirmedBookings =
                 confirmedBookingsByTableId.get(table.id) ?? [];
 
-              // Evaluasi batas tambah jam terhadap booking terkonfirmasi di meja ini
               const extendConstraint =
                 session && session.billing_mode === "package"
                   ? getSessionExtendConstraint(
@@ -564,7 +884,7 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                   } else {
                     isOvertime = true;
                     timerLabel = `+${formatSecondsHMS(Math.abs(remainingSec))}`;
-                    timerSubtext = "WAKTU HABIS — Segera selesaikan/tambah";
+                    timerSubtext = "WAKTU HABIS — Alarm Aktif!";
                   }
                 }
 
@@ -585,6 +905,8 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
               }
 
               const accent = getCardStatusAccent(table.status, isOvertime);
+              const isSessionAlarmMuted =
+                session !== null && mutedOvertimeIds.has(session.id);
 
               return (
                 <article
@@ -642,15 +964,31 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                           </span>
                         </div>
 
-                        <p
-                          className={`tabular-timer mt-2 font-heading text-3xl font-bold tracking-wider ${
-                            isOvertime
-                              ? "text-status-occupied"
-                              : "text-foreground"
-                          }`}
-                        >
-                          {timerLabel}
-                        </p>
+                        <div className="mt-2 flex items-center justify-between gap-2">
+                          <p
+                            className={`tabular-timer font-heading text-3xl font-bold tracking-wider ${
+                              isOvertime
+                                ? "text-status-occupied"
+                                : "text-foreground"
+                            }`}
+                          >
+                            {timerLabel}
+                          </p>
+
+                          {isOvertime && !isSessionAlarmMuted && soundEnabled && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMuteOvertimeSession(session.id)
+                              }
+                              title="Matikan bunyi alarm meja ini"
+                              className="inline-flex min-h-[38px] items-center gap-1 rounded-lg bg-status-occupied/20 px-2.5 text-[11px] font-bold text-status-occupied hover:bg-status-occupied hover:text-white"
+                            >
+                              <VolumeX className="h-3.5 w-3.5" />
+                              <span>Diam</span>
+                            </button>
+                          )}
+                        </div>
 
                         <p
                           className={`mt-0.5 text-[11px] ${
@@ -659,7 +997,9 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                               : "text-muted"
                           }`}
                         >
-                          {timerSubtext}
+                          {isOvertime && isSessionAlarmMuted
+                            ? "WAKTU HABIS (Alarm disenyapkan)"
+                            : timerSubtext}
                         </p>
 
                         {/* Penanda F&B aktif */}
@@ -786,7 +1126,8 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                               type="button"
                               disabled={extendBlocked}
                               title={
-                                extendBlocked && extendConstraint?.blockingBooking
+                                extendBlocked &&
+                                extendConstraint?.blockingBooking
                                   ? `Tidak bisa tambah jam: dibooking pukul ${formatTimeHHmm(extendConstraint.blockingBooking.start_time)} WIB`
                                   : "Tambah durasi paket jam"
                               }

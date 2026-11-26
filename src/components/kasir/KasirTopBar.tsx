@@ -3,8 +3,9 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlarmClock,
   Coffee,
   FileBarChart2,
   LayoutGrid,
@@ -12,8 +13,15 @@ import {
   Percent,
   Radio,
   Settings,
+  VolumeX,
 } from "lucide-react";
 import { WIB_TIMEZONE } from "@/lib/format";
+import {
+  playOvertimeAlarmSound,
+  triggerBrowserNotification,
+  unlockKasirAudio,
+} from "@/lib/kasir-alarm";
+import type { KasirDashboardData } from "@/types/kasir";
 
 export type KasirNavTab =
   | "meja"
@@ -51,6 +59,8 @@ const NAV_ITEMS: Array<{
   },
 ];
 
+const BG_ALARM_REPEAT_MS = 25_000;
+
 function formatWibClockHMS(ms: number): string {
   return new Intl.DateTimeFormat("id-ID", {
     timeZone: WIB_TIMEZONE,
@@ -61,25 +71,138 @@ function formatWibClockHMS(ms: number): string {
   }).format(new Date(ms));
 }
 
+function formatOvertimeHMS(overtimeSec: number): string {
+  const safe = Math.max(0, Math.floor(overtimeSec));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+  return `+${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
 export default function KasirTopBar({
   activeTab,
   realtimeConnected,
   rightActions,
 }: KasirTopBarProps) {
   const router = useRouter();
-  const [clockText, setClockText] = useState<string>("--:--:--");
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [clockReady, setClockReady] = useState(false);
+
+  // Watcher ringan saat kasir sedang berada di halaman selain /kasir (F&B, Diskon, Laporan, Pengaturan)
+  const [bgSnapshot, setBgSnapshot] = useState<KasirDashboardData | null>(null);
+  const [bgMutedIds, setBgMutedIds] = useState<Set<string>>(() => new Set());
+  const bgLastAlarmRef = useRef<Map<string, number>>(new Map());
+  const bgNotifiedRef = useRef<Set<string>>(new Set());
+
+  // Buka kunci AudioContext otomatis saat interaksi sentuhan/klik pertama kasir
+  useEffect(() => {
+    const handleUnlock = () => unlockKasirAudio();
+    window.addEventListener("pointerdown", handleUnlock, { passive: true });
+    window.addEventListener("keydown", handleUnlock);
+    return () => {
+      window.removeEventListener("pointerdown", handleUnlock);
+      window.removeEventListener("keydown", handleUnlock);
+    };
+  }, []);
 
   useEffect(() => {
-    const sync = () => setClockText(formatWibClockHMS(Date.now()));
-    sync();
-    const id = window.setInterval(sync, 1000);
+    setClockReady(true);
+    setNowMs(Date.now());
+    const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  const fetchBgSessions = useCallback(async () => {
+    try {
+      const res = await fetch("/api/kasir/dashboard", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as KasirDashboardData;
+      setBgSnapshot(data);
+    } catch {
+      // Abaikan jika offline sementara
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "meja") return;
+    void fetchBgSessions();
+    const id = window.setInterval(() => {
+      void fetchBgSessions();
+    }, 15_000);
+    return () => window.clearInterval(id);
+  }, [activeTab, fetchBgSessions]);
+
+  const bgOvertimeAlerts = useMemo(() => {
+    if (activeTab === "meja" || !bgSnapshot) return [];
+    const tableById = new Map(bgSnapshot.tables.map((t) => [t.id, t]));
+    const list: Array<{
+      sessionId: string;
+      tableName: string;
+      customerName: string;
+      overtimeSec: number;
+    }> = [];
+
+    for (const sess of bgSnapshot.activeSessions) {
+      if (sess.billing_mode !== "package") continue;
+      const startMs = new Date(sess.start_time).getTime();
+      const totalSec = sess.duration_minutes * 60;
+      const elapsedSec = Math.floor((nowMs - startMs) / 1000);
+      const remainingSec = totalSec - elapsedSec;
+      if (remainingSec <= 0) {
+        list.push({
+          sessionId: sess.id,
+          tableName: tableById.get(sess.table_id)?.name ?? "Meja",
+          customerName: sess.customer_name,
+          overtimeSec: Math.abs(remainingSec),
+        });
+      }
+    }
+    return list;
+  }, [activeTab, bgSnapshot, nowMs]);
+
+  useEffect(() => {
+    if (activeTab === "meja" || bgOvertimeAlerts.length === 0) return;
+
+    let shouldRing = false;
+    for (const item of bgOvertimeAlerts) {
+      if (!bgNotifiedRef.current.has(item.sessionId)) {
+        bgNotifiedRef.current.add(item.sessionId);
+        triggerBrowserNotification({
+          title: `⏰ WAKTU HABIS — ${item.tableName}!`,
+          body: `Sesi Paket ${item.customerName} di ${item.tableName} telah berakhir. Klik untuk kembali ke Dashboard Meja.`,
+          tag: `overtime-${item.sessionId}`,
+        });
+      }
+
+      if (bgMutedIds.has(item.sessionId)) continue;
+      const lastFired = bgLastAlarmRef.current.get(item.sessionId) ?? 0;
+      if (nowMs - lastFired >= BG_ALARM_REPEAT_MS) {
+        bgLastAlarmRef.current.set(item.sessionId, nowMs);
+        shouldRing = true;
+      }
+    }
+
+    if (shouldRing) {
+      playOvertimeAlarmSound();
+    }
+  }, [activeTab, bgMutedIds, bgOvertimeAlerts, nowMs]);
+
+  const handleMuteBgAll = () => {
+    setBgMutedIds((prev) => {
+      const next = new Set(prev);
+      for (const item of bgOvertimeAlerts) {
+        next.add(item.sessionId);
+      }
+      return next;
+    });
+  };
 
   const handleLogout = async () => {
     await fetch("/api/kasir/auth/logout", { method: "POST" });
     router.refresh();
   };
+
+  const clockText = clockReady ? formatWibClockHMS(nowMs) : "--:--:--";
 
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-surface/95 backdrop-blur-md">
@@ -185,6 +308,40 @@ export default function KasirTopBar({
           );
         })}
       </nav>
+
+      {/* Strip Peringatan Alarm Waktu Habis Saat Kasir Berada di Halaman Lain */}
+      {activeTab !== "meja" && bgOvertimeAlerts.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-status-occupied/50 bg-status-occupied px-4 py-2.5 text-white">
+          <div className="flex items-center gap-2 text-xs font-extrabold sm:text-sm">
+            <AlarmClock className="h-5 w-5 shrink-0 animate-bounce" />
+            <span>
+              WAKTU HABIS:{" "}
+              {bgOvertimeAlerts
+                .map(
+                  (a) =>
+                    `${a.tableName} (${a.customerName} ${formatOvertimeHMS(a.overtimeSec)})`,
+                )
+                .join(" • ")}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleMuteBgAll}
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-black/25 px-3 text-xs font-bold text-white hover:bg-black/40"
+            >
+              <VolumeX className="h-4 w-4" />
+              <span>Senyapkan</span>
+            </button>
+            <Link
+              href="/kasir"
+              className="inline-flex min-h-[40px] items-center rounded-xl bg-white px-3.5 text-xs font-extrabold text-[#121212] hover:bg-white/90"
+            >
+              Buka Meja →
+            </Link>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
