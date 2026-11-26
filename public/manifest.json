@@ -1,0 +1,33 @@
+{
+  "name": "1St!cx Billiard (Onesticx)",
+  "short_name": "Onesticx",
+  "description": "Booking meja billiard real-time dan sistem kasir 1St!cx Billiard Lhokseumawe.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#121212",
+  "theme_color": "#121212",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/images/onesticx-logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Dashboard Kasir",
+      "short_name": "Kasir",
+      "description": "Buka dashboard meja & antrean booking kasir",
+      "url": "/kasir",
+      "icons": [
+        {
+          "src": "/images/onesticx-logo.png",
+          "sizes": "512x512",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}
