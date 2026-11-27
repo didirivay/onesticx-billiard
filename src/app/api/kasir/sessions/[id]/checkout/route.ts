@@ -129,6 +129,8 @@ export async function POST(request: Request, context: CheckoutRouteContext) {
   const hasLockedBookingDiscount =
     Boolean(session.booking_id) && session.discount_amount > 0;
 
+  const effectiveDurationHours = Math.floor(finalDurationMinutes / 60);
+
   const tablePromoDiscount = hasLockedBookingDiscount
     ? Math.min(finalTableCost, session.discount_amount)
     : applyPromo
@@ -137,6 +139,7 @@ export async function POST(request: Request, context: CheckoutRouteContext) {
           table.id,
           table.category,
           finalTableCost,
+          effectiveDurationHours,
         ).discountAmount
       : 0;
 

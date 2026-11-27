@@ -20,8 +20,10 @@ import {
 } from "lucide-react";
 import { getBrowserSupabaseClient } from "@/lib/supabase/client";
 import {
-  DURATION_OPTIONS,
+  MAX_BOOKING_DURATION_HOURS,
+  MIN_BOOKING_DURATION_HOURS,
   OPERATIONAL_START_SLOTS,
+  PRESET_DURATION_OPTIONS,
   calculateEndTimeHHmm,
   formatIndonesianDate,
   formatRupiah,
@@ -33,6 +35,7 @@ import {
   getWibNow,
   isTimeRangeOverlap,
   maskCustomerName,
+  parseStrictDurationHours,
   toOperationalMinutes,
 } from "@/lib/format";
 import type {
@@ -110,6 +113,7 @@ export default function CustomerPortal({
 }: CustomerPortalProps) {
   const router = useRouter();
   const bookingFormRef = useRef<HTMLElement | null>(null);
+  const customDurationInputRef = useRef<HTMLInputElement | null>(null);
 
   // Live state
   const [tables, setTables] = useState<BilliardTable[]>(initialTables);
@@ -138,6 +142,9 @@ export default function CustomerPortal({
     getNextDefaultStartSlot(initialTodayWib, initialTodayWib),
   );
   const [durationHours, setDurationHours] = useState<number>(1);
+  const [isCustomDuration, setIsCustomDuration] = useState<boolean>(false);
+  const [customDurationInput, setCustomDurationInput] = useState<string>("");
+  const [customInputHint, setCustomInputHint] = useState<string | null>(null);
   const [customerName, setCustomerName] = useState<string>("");
   const [whatsappNumber, setWhatsappNumber] = useState<string>("");
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -417,10 +424,11 @@ export default function CustomerPortal({
     }
   }, [slotAvailability, startTime]);
 
-  // Hitung durasi maksimal yang valid (tidak melewati 02:00 WIB dan tidak menabrak booking berikutnya)
-  const validDurations = useMemo(() => {
+  // Hitung durasi maksimal yang valid (1..10 jam, tidak melewati 02:00 WIB & tidak menabrak booking berikutnya)
+  const durationAvailability = useMemo(() => {
     const maxByClosing = getMaxDurationHoursForStart(startTime);
-    return DURATION_OPTIONS.map((hours) => {
+
+    const checkDuration = (hours: number) => {
       const exceedsClosing = hours > maxByClosing;
       const overlapsBooking = selectedTableDayBookings.some((existing) =>
         isTimeRangeOverlap(
@@ -431,43 +439,198 @@ export default function CustomerPortal({
         ),
       );
       return {
-        hours,
+        exceedsClosing,
+        overlapsBooking,
         disabled: exceedsClosing || overlapsBooking,
       };
-    });
+    };
+
+    let maxContiguous = 0;
+    for (let h = MIN_BOOKING_DURATION_HOURS; h <= maxByClosing; h += 1) {
+      if (checkDuration(h).overlapsBooking) break;
+      maxContiguous = h;
+    }
+
+    const presets = PRESET_DURATION_OPTIONS.map((hours) => ({
+      hours,
+      ...checkDuration(hours),
+    }));
+
+    return {
+      maxByClosing,
+      maxContiguous,
+      presets,
+      checkDuration,
+    };
   }, [startTime, selectedTableDayBookings]);
 
   useEffect(() => {
-    const chosen = validDurations.find((d) => d.hours === durationHours);
+    if (isCustomDuration) return;
+    const chosen = durationAvailability.presets.find(
+      (d) => d.hours === durationHours,
+    );
     if (chosen?.disabled) {
-      const fallback = validDurations.find((d) => !d.disabled);
+      const fallback = durationAvailability.presets.find((d) => !d.disabled);
       if (fallback) {
         setDurationHours(fallback.hours);
       }
     }
-  }, [validDurations, durationHours]);
+  }, [durationAvailability.presets, durationHours, isCustomDuration]);
 
-  const baseBookingPrice = selectedTable
-    ? selectedTable.hourly_rate * durationHours
-    : 0;
-  const selectedTablePromoMatch = selectedTable
-    ? getBestTablePromoForTable(
-        initialPromoDiscounts,
-        selectedTable.id,
-        selectedTable.category,
-        baseBookingPrice,
-      )
-    : { rule: null, discountAmount: 0 };
+  const customDurationState = useMemo(() => {
+    if (!isCustomDuration) {
+      return {
+        parsedHours: durationHours,
+        error: null as string | null,
+        valid: true,
+      };
+    }
+
+    const trimmed = customDurationInput.trim();
+    if (!trimmed) {
+      return {
+        parsedHours: null as number | null,
+        error: null as string | null,
+        valid: false,
+      };
+    }
+
+    if (!/^\d+$/.test(trimmed)) {
+      return {
+        parsedHours: null,
+        error:
+          "Durasi hanya boleh diisi angka bulat 1–10 (tidak boleh huruf atau simbol).",
+        valid: false,
+      };
+    }
+
+    if (trimmed.startsWith("0")) {
+      return {
+        parsedHours: null,
+        error: "Durasi harus bilangan asli antara 1 sampai 10 jam (tidak boleh 0).",
+        valid: false,
+      };
+    }
+
+    const parsed = parseStrictDurationHours(
+      trimmed,
+      MIN_BOOKING_DURATION_HOURS,
+      MAX_BOOKING_DURATION_HOURS,
+    );
+    if (parsed === null) {
+      return {
+        parsedHours: null,
+        error: `Durasi harus bilangan asli antara ${MIN_BOOKING_DURATION_HOURS} sampai ${MAX_BOOKING_DURATION_HOURS} jam.`,
+        valid: false,
+      };
+    }
+
+    const check = durationAvailability.checkDuration(parsed);
+    if (check.exceedsClosing) {
+      return {
+        parsedHours: null,
+        error: `Melebihi jam tutup (02.00 WIB). Maksimal mulai ${startTime} WIB adalah ${durationAvailability.maxByClosing} jam.`,
+        valid: false,
+      };
+    }
+    if (check.overlapsBooking) {
+      return {
+        parsedHours: null,
+        error: `Durasi ${parsed} jam bentrok dengan jadwal booking lain. Maksimal tersedia ${durationAvailability.maxContiguous} jam.`,
+        valid: false,
+      };
+    }
+
+    return {
+      parsedHours: parsed,
+      error: null,
+      valid: true,
+    };
+  }, [
+    customDurationInput,
+    durationAvailability,
+    durationHours,
+    isCustomDuration,
+    startTime,
+  ]);
+
+  const effectiveDurationHours = isCustomDuration
+    ? customDurationState.parsedHours
+    : durationHours;
+
+  const baseBookingPrice =
+    selectedTable && effectiveDurationHours !== null
+      ? selectedTable.hourly_rate * effectiveDurationHours
+      : 0;
+  const selectedTablePromoMatch =
+    selectedTable && effectiveDurationHours !== null
+      ? getBestTablePromoForTable(
+          initialPromoDiscounts,
+          selectedTable.id,
+          selectedTable.category,
+          baseBookingPrice,
+          effectiveDurationHours,
+        )
+      : { rule: null, discountAmount: 0 };
   const selectedTablePromo = selectedTablePromoMatch.rule;
   const bookingPromoDiscount = selectedTablePromoMatch.discountAmount;
   const estimatedTotal = Math.max(0, baseBookingPrice - bookingPromoDiscount);
-  const endTimeHHmm = calculateEndTimeHHmm(startTime, durationHours);
+  const endTimeHHmm =
+    effectiveDurationHours !== null
+      ? calculateEndTimeHHmm(startTime, effectiveDurationHours)
+      : null;
 
   const selectedSlotInvalid = useMemo(() => {
     const s = slotAvailability.find((x) => x.slot === startTime);
-    const d = validDurations.find((x) => x.hours === durationHours);
-    return !s || s.disabled || !d || d.disabled;
-  }, [slotAvailability, validDurations, startTime, durationHours]);
+    if (!s || s.disabled) return true;
+    if (isCustomDuration) {
+      return !customDurationState.valid || effectiveDurationHours === null;
+    }
+    const d = durationAvailability.presets.find((x) => x.hours === durationHours);
+    return !d || d.disabled;
+  }, [
+    slotAvailability,
+    startTime,
+    isCustomDuration,
+    customDurationState.valid,
+    effectiveDurationHours,
+    durationAvailability.presets,
+    durationHours,
+  ]);
+
+  const handleCustomDurationKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key.length === 1 && !/^\d$/.test(e.key)) {
+      e.preventDefault();
+      setCustomInputHint(
+        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
+      );
+    }
+  };
+
+  const handleCustomDurationChange = (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const raw = e.target.value;
+    if (raw === "") {
+      setCustomDurationInput("");
+      setCustomInputHint(null);
+      setFormError(null);
+      return;
+    }
+    if (/[^0-9]/.test(raw)) {
+      setCustomInputHint(
+        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
+      );
+      return;
+    }
+    if (raw.length > 2) return;
+    setCustomInputHint(null);
+    setCustomDurationInput(raw);
+    setFormError(null);
+  };
 
   const handleSelectTableCard = (tableId: string) => {
     setSelectedTableId(tableId);
@@ -503,9 +666,17 @@ export default function CustomerPortal({
       );
       return;
     }
+    if (effectiveDurationHours === null) {
+      setFormError(
+        customDurationState.error ??
+          "Masukkan durasi bermain berupa bilangan asli antara 1 sampai 10 jam (tanpa huruf).",
+      );
+      return;
+    }
     if (selectedSlotInvalid) {
       setFormError(
-        "Jam atau durasi yang dipilih tidak tersedia. Silakan pilih jadwal lain.",
+        customDurationState.error ??
+          "Jam atau durasi yang dipilih tidak tersedia. Silakan pilih jadwal lain.",
       );
       return;
     }
@@ -521,7 +692,7 @@ export default function CustomerPortal({
           whatsappNumber: whatsappNumber.trim(),
           bookingDate,
           startTime,
-          durationHours,
+          durationHours: effectiveDurationHours,
         }),
       });
 
@@ -1055,18 +1226,39 @@ export default function CustomerPortal({
                 4. Durasi Bermain (Paket Jam)
               </span>
               <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-                {validDurations.map(({ hours, disabled }) => {
-                  const active = durationHours === hours && !disabled;
+                {durationAvailability.presets.map(({ hours, disabled }) => {
+                  const active =
+                    !isCustomDuration && durationHours === hours && !disabled;
+                  const presetPromo = selectedTable
+                    ? getBestTablePromoForTable(
+                        initialPromoDiscounts,
+                        selectedTable.id,
+                        selectedTable.category,
+                        selectedTable.hourly_rate * hours,
+                        hours,
+                      )
+                    : { rule: null, discountAmount: 0 };
+                  const presetPromoLabel =
+                    presetPromo.rule &&
+                    presetPromo.rule.type === "duration_percent" &&
+                    presetPromo.discountAmount > 0
+                      ? formatPromoShortTag(presetPromo.rule, hours).replace(
+                          "Diskon ",
+                          "-",
+                        )
+                      : "";
                   return (
                     <button
                       key={hours}
                       type="button"
                       disabled={disabled}
                       onClick={() => {
+                        setIsCustomDuration(false);
                         setDurationHours(hours);
+                        setCustomInputHint(null);
                         setFormError(null);
                       }}
-                      className={`tabular-nums min-h-[48px] rounded-xl border text-sm font-semibold transition ${
+                      className={`tabular-nums flex min-h-[48px] flex-col items-center justify-center rounded-xl border px-1 text-sm font-semibold transition ${
                         active
                           ? "border-primary bg-primary text-white shadow-md shadow-primary/25"
                           : disabled
@@ -1074,11 +1266,89 @@ export default function CustomerPortal({
                             : "border-border bg-background text-foreground hover:border-primary/60"
                       }`}
                     >
-                      {hours} Jam
+                      <span>{hours} Jam</span>
+                      {presetPromoLabel && !disabled && (
+                        <span
+                          className={`text-[10px] font-bold ${
+                            active ? "text-white/90" : "text-status-available"
+                          }`}
+                        >
+                          {presetPromoLabel}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
+
+                <button
+                  type="button"
+                  disabled={durationAvailability.maxContiguous < 1}
+                  onClick={() => {
+                    setIsCustomDuration(true);
+                    setCustomInputHint(null);
+                    setFormError(null);
+                    window.requestAnimationFrame(() => {
+                      customDurationInputRef.current?.focus();
+                      customDurationInputRef.current?.select();
+                    });
+                  }}
+                  className={`min-h-[48px] rounded-xl border text-sm font-semibold transition ${
+                    isCustomDuration
+                      ? "border-primary bg-primary text-white shadow-md shadow-primary/25"
+                      : durationAvailability.maxContiguous < 1
+                        ? "cursor-not-allowed border-border/50 bg-background/40 text-muted/40"
+                        : "border-border bg-background text-foreground hover:border-primary/60"
+                  }`}
+                >
+                  Custom
+                </button>
               </div>
+
+              {isCustomDuration && (
+                <div className="mt-3 rounded-xl border border-primary/40 bg-background p-3.5">
+                  <label
+                    htmlFor="booking-custom-duration"
+                    className="mb-2 flex items-center justify-between gap-2 text-xs font-semibold text-foreground"
+                  >
+                    <span>Masukkan Durasi Custom (1–10 Jam)</span>
+                    <span className="tabular-nums text-[11px] font-medium text-muted">
+                      Tersedia maks. {durationAvailability.maxContiguous} jam
+                    </span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={customDurationInputRef}
+                      id="booking-custom-duration"
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      autoComplete="off"
+                      maxLength={2}
+                      value={customDurationInput}
+                      onKeyDown={handleCustomDurationKeyDown}
+                      onChange={handleCustomDurationChange}
+                      placeholder="Contoh: 6, 7, 8, 9, atau 10"
+                      className={`tabular-nums min-h-[48px] flex-1 rounded-xl border bg-surface px-3.5 text-sm font-semibold text-foreground placeholder:font-normal placeholder:text-muted/70 focus:outline-none ${
+                        customInputHint || customDurationState.error
+                          ? "border-status-occupied focus:border-status-occupied"
+                          : "border-border focus:border-primary"
+                      }`}
+                    />
+                    <span className="flex min-h-[48px] items-center rounded-xl border border-border bg-surface px-3.5 text-sm font-bold text-muted">
+                      Jam
+                    </span>
+                  </div>
+                  {customInputHint || customDurationState.error ? (
+                    <p className="mt-2 text-xs font-semibold text-status-occupied">
+                      {customInputHint ?? customDurationState.error}
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-[11px] text-muted">
+                      Isi bilangan asli 1 sampai 10 (hanya angka bulat, tanpa huruf).
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* 5. Data Pelanggan */}
@@ -1140,8 +1410,9 @@ export default function CustomerPortal({
               <div className="mt-2 flex items-center justify-between text-xs text-muted">
                 <span>Jadwal</span>
                 <span className="tabular-timer font-semibold text-foreground">
-                  {formatShortIndonesianDate(bookingDate)} • {startTime} -{" "}
-                  {endTimeHHmm} WIB ({durationHours} Jam)
+                  {effectiveDurationHours !== null && endTimeHHmm
+                    ? `${formatShortIndonesianDate(bookingDate)} • ${startTime} - ${endTimeHHmm} WIB (${effectiveDurationHours} Jam)`
+                    : `${formatShortIndonesianDate(bookingDate)} • Mulai ${startTime} WIB (Isi durasi 1–10 jam)`}
                 </span>
               </div>
               {bookingPromoDiscount > 0 && selectedTablePromo && (
@@ -1156,7 +1427,12 @@ export default function CustomerPortal({
                     <span>
                       {selectedTablePromo.label ||
                         `Promo ${selectedTable ? getCategoryLabel(selectedTable.category) : ""}`}{" "}
-                      ({formatPromoShortTag(selectedTablePromo)})
+                      (
+                      {formatPromoShortTag(
+                        selectedTablePromo,
+                        effectiveDurationHours ?? undefined,
+                      )}
+                      )
                     </span>
                     <span className="tabular-money font-semibold">
                       -{formatRupiah(bookingPromoDiscount)}

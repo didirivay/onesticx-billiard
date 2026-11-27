@@ -10,12 +10,15 @@ import { getBestTablePromoForTable } from "@/lib/promo-discounts";
 import { loadPromoDiscountsServer } from "@/lib/promo-discounts-server";
 import {
   CLOSING_OPERATIONAL_MINUTES,
+  MAX_BOOKING_DURATION_HOURS,
+  MIN_BOOKING_DURATION_HOURS,
   OPERATIONAL_START_SLOTS,
   WIB_TIMEZONE,
   formatTimeHHmm,
   getWibNow,
   isTimeRangeOverlap,
   normalizeWhatsappNumber,
+  parseStrictDurationHours,
   toOperationalMinutes,
 } from "@/lib/format";
 
@@ -58,10 +61,11 @@ export async function POST(request: Request) {
     typeof body.bookingDate === "string" ? body.bookingDate.trim() : "";
   const rawStartTime =
     typeof body.startTime === "string" ? formatTimeHHmm(body.startTime.trim()) : "";
-  const durationHours =
-    typeof body.durationHours === "number"
-      ? Math.trunc(body.durationHours)
-      : Number.parseInt(String(body.durationHours ?? ""), 10);
+  const durationHours = parseStrictDurationHours(
+    body.durationHours,
+    MIN_BOOKING_DURATION_HOURS,
+    MAX_BOOKING_DURATION_HOURS,
+  );
 
   if (!tableId) {
     return NextResponse.json(
@@ -113,9 +117,12 @@ export async function POST(request: Request) {
     );
   }
 
-  if (!Number.isInteger(durationHours) || durationHours < 1 || durationHours > 6) {
+  if (durationHours === null) {
     return NextResponse.json(
-      { error: "Durasi bermain harus antara 1 sampai 6 jam." },
+      {
+        error:
+          "Durasi bermain harus berupa bilangan asli antara 1 sampai 10 jam (angka bulat tanpa huruf).",
+      },
       { status: 400 },
     );
   }
@@ -240,6 +247,7 @@ export async function POST(request: Request) {
     table.id,
     table.category,
     basePrice,
+    durationHours,
   );
   const totalPrice = Math.max(0, basePrice - promoDiscount);
 

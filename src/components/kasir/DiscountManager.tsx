@@ -20,11 +20,16 @@ import {
 import KasirTopBar from "@/components/kasir/KasirTopBar";
 import { formatRupiah } from "@/lib/format";
 import {
+  DURATION_TIER_HOURS,
   calculateRuleDiscount,
   formatPromoShortTag,
+  hasAnyDurationTierDiscount,
   isRuleEffective,
+  makeDefaultDurationTiers,
   type CategoryDiscountRule,
   type DiscountRuleType,
+  type DurationDiscountTiers,
+  type DurationTierKey,
   type PromoDiscountsConfig,
   type PromoScope,
 } from "@/lib/promo-discounts";
@@ -84,6 +89,31 @@ const SCOPE_META: Record<PromoScope, ScopeMeta> = {
 const BASE_SCOPE_ORDER: PromoScope[] = ["indoor", "outdoor", "fnb", "high_table"];
 const PERCENT_PRESETS = [5, 10, 15, 20, 25];
 const NOMINAL_PRESETS = [5000, 10000, 15000, 20000];
+const DURATION_TIER_PRESETS: Array<{
+  label: string;
+  tiers: DurationDiscountTiers;
+}> = [
+  {
+    label: "Bertahap 5–25%",
+    tiers: { "1": 5, "2": 10, "3": 15, "4": 20, "5": 25 },
+  },
+  {
+    label: "Mulai 2j (10–25%)",
+    tiers: { "1": 0, "2": 10, "3": 15, "4": 20, "5": 25 },
+  },
+  {
+    label: "Bertahap 10–30%",
+    tiers: { "1": 10, "2": 15, "3": 20, "4": 25, "5": 30 },
+  },
+];
+
+const DEFAULT_STARTER_TIERS: DurationDiscountTiers = {
+  "1": 5,
+  "2": 10,
+  "3": 15,
+  "4": 20,
+  "5": 25,
+};
 
 export default function DiscountManager({
   initialDiscounts,
@@ -102,6 +132,9 @@ export default function DiscountManager({
   const [newLabel, setNewLabel] = useState("");
   const [newType, setNewType] = useState<DiscountRuleType>("percent");
   const [newValue, setNewValue] = useState("10");
+  const [newDurationTiers, setNewDurationTiers] = useState<DurationDiscountTiers>(
+    () => ({ ...DEFAULT_STARTER_TIERS }),
+  );
   const [newApplyAll, setNewApplyAll] = useState(false);
   const [newTargetIds, setNewTargetIds] = useState<string[]>([]);
 
@@ -284,6 +317,7 @@ export default function DiscountManager({
     setNewLabel("");
     setNewType("percent");
     setNewValue("10");
+    setNewDurationTiers({ ...DEFAULT_STARTER_TIERS });
     setNewApplyAll(false);
     setNewTargetIds(indoorTargets[0] ? [indoorTargets[0].id] : []);
     setCreateModalOpen(true);
@@ -291,8 +325,15 @@ export default function DiscountManager({
 
   const handleCreateCustomRule = (e: React.FormEvent) => {
     e.preventDefault();
+    const isDurationMode =
+      newType === "duration_percent" && newScope !== "fnb";
     const numeric = Number.parseInt(newValue.replace(/\D/g, ""), 10) || 0;
-    if (numeric <= 0) return;
+
+    if (isDurationMode) {
+      if (!hasAnyDurationTierDiscount(newDurationTiers)) return;
+    } else if (numeric <= 0) {
+      return;
+    }
 
     const clamped = newType === "percent" ? Math.min(100, numeric) : numeric;
     const rule: CategoryDiscountRule = {
@@ -300,8 +341,11 @@ export default function DiscountManager({
       scope: newScope,
       enabled: true,
       label: newLabel.trim(),
-      type: newType,
-      value: clamped,
+      type: isDurationMode ? "duration_percent" : newType,
+      value: isDurationMode ? 0 : clamped,
+      duration_tiers: isDurationMode
+        ? { ...newDurationTiers }
+        : makeDefaultDurationTiers(),
       apply_to_all: newApplyAll,
       target_ids: newApplyAll ? [] : newTargetIds,
     };
@@ -490,6 +534,20 @@ export default function DiscountManager({
                         type="button"
                         onClick={() => {
                           const nextEnabled = !rule.enabled;
+                          if (rule.type === "duration_percent") {
+                            const nextTiers =
+                              nextEnabled &&
+                              !hasAnyDurationTierDiscount(rule.duration_tiers)
+                                ? { ...DEFAULT_STARTER_TIERS }
+                                : rule.duration_tiers;
+                            patchRule(
+                              rule.id,
+                              isCustom,
+                              { enabled: nextEnabled, duration_tiers: nextTiers },
+                              true,
+                            );
+                            return;
+                          }
                           const nextVal =
                             nextEnabled && rule.value === 0
                               ? rule.type === "percent"
@@ -661,160 +719,338 @@ export default function DiscountManager({
                     </div>
 
                     {/* 3. Tipe & Nilai Diskon */}
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
-                      <div className="sm:col-span-5">
-                        <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
-                          Tipe
-                        </span>
-                        <div className="grid grid-cols-2 gap-1 rounded-xl border border-border bg-background p-1">
-                          {(
-                            [
-                              { id: "percent", label: "Persen (%)" },
-                              { id: "nominal", label: "Rp" },
-                            ] as Array<{
-                              id: DiscountRuleType;
-                              label: string;
-                            }>
-                          ).map((opt) => (
+                    <div>
+                      <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
+                        Tipe Potongan
+                      </span>
+                      <div
+                        className={`grid gap-1 rounded-xl border border-border bg-background p-1 ${
+                          rule.scope === "fnb" ? "grid-cols-2" : "grid-cols-3"
+                        }`}
+                      >
+                        {(
+                          [
+                            { id: "percent", label: "Persen (%)" },
+                            ...(rule.scope !== "fnb"
+                              ? [
+                                  {
+                                    id: "duration_percent" as const,
+                                    label: "Per Jam (1–5j)",
+                                  },
+                                ]
+                              : []),
+                            { id: "nominal", label: "Rp" },
+                          ] as Array<{
+                            id: DiscountRuleType;
+                            label: string;
+                          }>
+                        ).map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => {
+                              if (opt.id === "duration_percent") {
+                                const nextTiers = hasAnyDurationTierDiscount(
+                                  rule.duration_tiers,
+                                )
+                                  ? rule.duration_tiers
+                                  : { ...DEFAULT_STARTER_TIERS };
+                                patchRule(
+                                  rule.id,
+                                  isCustom,
+                                  {
+                                    type: "duration_percent",
+                                    duration_tiers: nextTiers,
+                                  },
+                                  true,
+                                );
+                                return;
+                              }
+                              patchRule(
+                                rule.id,
+                                isCustom,
+                                {
+                                  type: opt.id,
+                                  value:
+                                    opt.id === "percent"
+                                      ? Math.min(100, rule.value || 10)
+                                      : rule.value < 500
+                                        ? 5000
+                                        : rule.value,
+                                },
+                                true,
+                              );
+                            }}
+                            className={`min-h-[48px] rounded-lg px-2 text-xs font-bold transition ${
+                              rule.type === opt.id
+                                ? "bg-primary text-white"
+                                : "text-muted hover:text-foreground"
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {rule.type === "duration_percent" && rule.scope !== "fnb" ? (
+                      <div className="space-y-3 rounded-2xl border border-border bg-background p-3.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs font-bold uppercase tracking-wider text-muted">
+                            Custom Diskon Per Durasi (1–5 Jam)
+                          </span>
+                          <span className="text-[11px] text-muted">
+                            6–10 jam ikut 5 Jam+
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                          {DURATION_TIER_HOURS.map((hour) => {
+                            const key = String(hour) as DurationTierKey;
+                            const pctVal = rule.duration_tiers[key] ?? 0;
+                            return (
+                              <div
+                                key={hour}
+                                className="rounded-xl border border-border bg-surface p-2.5"
+                              >
+                                <label
+                                  htmlFor={`tier-${rule.id}-${hour}`}
+                                  className="block text-[11px] font-bold uppercase tracking-wide text-muted"
+                                >
+                                  {hour === 5 ? "5 Jam+" : `${hour} Jam`}
+                                </label>
+                                <div className="mt-1.5 flex items-center gap-1">
+                                  <input
+                                    id={`tier-${rule.id}-${hour}`}
+                                    type="text"
+                                    inputMode="numeric"
+                                    pattern="[0-9]*"
+                                    maxLength={3}
+                                    value={pctVal === 0 ? "" : String(pctVal)}
+                                    onChange={(e) => {
+                                      const digits = e.target.value.replace(
+                                        /\D/g,
+                                        "",
+                                      );
+                                      const num = digits
+                                        ? Math.min(100, Number.parseInt(digits, 10))
+                                        : 0;
+                                      patchRule(
+                                        rule.id,
+                                        isCustom,
+                                        {
+                                          duration_tiers: {
+                                            ...rule.duration_tiers,
+                                            [key]: num,
+                                          },
+                                        },
+                                        false,
+                                      );
+                                    }}
+                                    placeholder="0"
+                                    className="tabular-nums min-h-[48px] w-full rounded-lg border border-border bg-background px-2 text-center text-sm font-bold text-foreground placeholder:text-muted/50 focus:border-primary focus:outline-none"
+                                  />
+                                  <span className="text-xs font-bold text-muted">
+                                    %
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Preset Cepat Bertahap */}
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <span className="text-[11px] font-semibold text-muted">
+                            Cepat:
+                          </span>
+                          {DURATION_TIER_PRESETS.map((preset) => (
                             <button
-                              key={opt.id}
+                              key={preset.label}
                               type="button"
                               onClick={() =>
                                 patchRule(
                                   rule.id,
                                   isCustom,
                                   {
-                                    type: opt.id,
-                                    value:
-                                      opt.id === "percent"
-                                        ? Math.min(100, rule.value || 10)
-                                        : rule.value < 500
-                                          ? 5000
-                                          : rule.value,
+                                    enabled: true,
+                                    duration_tiers: { ...preset.tiers },
                                   },
                                   true,
                                 )
                               }
-                              className={`min-h-[42px] rounded-lg px-2 text-xs font-bold transition ${
-                                rule.type === opt.id
-                                  ? "bg-primary text-white"
-                                  : "text-muted hover:text-foreground"
-                              }`}
+                              className="min-h-[48px] rounded-xl border border-border bg-surface px-3 text-xs font-bold text-muted transition hover:border-primary/60 hover:text-foreground"
                             >
-                              {opt.label}
+                              {preset.label}
                             </button>
                           ))}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              patchRule(
+                                rule.id,
+                                isCustom,
+                                { duration_tiers: makeDefaultDurationTiers() },
+                                true,
+                              )
+                            }
+                            className="min-h-[48px] rounded-xl border border-border bg-surface px-3 text-xs font-bold text-muted transition hover:border-status-occupied/60 hover:text-status-occupied"
+                          >
+                            Reset 0%
+                          </button>
                         </div>
                       </div>
+                    ) : (
+                      <>
+                        <div>
+                          <label
+                            htmlFor={`promo-value-${rule.id}`}
+                            className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted"
+                          >
+                            Besaran ({rule.type === "percent" ? "%" : "Rp"})
+                          </label>
+                          <input
+                            id={`promo-value-${rule.id}`}
+                            type="number"
+                            inputMode="numeric"
+                            min={0}
+                            max={rule.type === "percent" ? 100 : 10000000}
+                            value={rule.value === 0 ? "" : rule.value}
+                            onChange={(e) => {
+                              const num = Number.parseInt(
+                                e.target.value.replace(/\D/g, ""),
+                                10,
+                              );
+                              const safe = Number.isNaN(num) ? 0 : num;
+                              patchRule(
+                                rule.id,
+                                isCustom,
+                                {
+                                  value:
+                                    rule.type === "percent"
+                                      ? Math.min(100, safe)
+                                      : safe,
+                                },
+                                false,
+                              );
+                            }}
+                            placeholder={
+                              rule.type === "percent"
+                                ? "Contoh: 10"
+                                : "Contoh: 5000"
+                            }
+                            className="tabular-nums min-h-[48px] w-full rounded-xl border border-border bg-background px-4 text-base font-bold text-foreground placeholder:text-muted/60 focus:border-primary focus:outline-none"
+                          />
+                        </div>
 
-                      <div className="sm:col-span-7">
-                        <label
-                          htmlFor={`promo-value-${rule.id}`}
-                          className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted"
-                        >
-                          Besaran ({rule.type === "percent" ? "%" : "Rp"})
-                        </label>
-                        <input
-                          id={`promo-value-${rule.id}`}
-                          type="number"
-                          inputMode="numeric"
-                          min={0}
-                          max={rule.type === "percent" ? 100 : 10000000}
-                          value={rule.value === 0 ? "" : rule.value}
-                          onChange={(e) => {
-                            const num = Number.parseInt(
-                              e.target.value.replace(/\D/g, ""),
-                              10,
-                            );
-                            const safe = Number.isNaN(num) ? 0 : num;
-                            patchRule(
-                              rule.id,
-                              isCustom,
-                              {
-                                value:
-                                  rule.type === "percent"
-                                    ? Math.min(100, safe)
-                                    : safe,
-                              },
-                              false,
-                            );
-                          }}
-                          placeholder={
-                            rule.type === "percent"
-                              ? "Contoh: 10"
-                              : "Contoh: 5000"
-                          }
-                          className="tabular-nums min-h-[48px] w-full rounded-xl border border-border bg-background px-4 text-base font-bold text-foreground placeholder:text-muted/60 focus:border-primary focus:outline-none"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Preset Cepat (1 Ketuk Langsung Aktif & Tersimpan) */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[11px] font-semibold text-muted">
-                        Cepat:
-                      </span>
-                      {rule.type === "percent"
-                        ? PERCENT_PRESETS.map((pct) => (
-                            <button
-                              key={pct}
-                              type="button"
-                              onClick={() =>
-                                patchRule(
-                                  rule.id,
-                                  isCustom,
-                                  { enabled: true, value: pct },
-                                  true,
-                                )
-                              }
-                              className={`tabular-nums min-h-[40px] rounded-xl border px-3 text-xs font-bold transition ${
-                                rule.enabled && rule.value === pct
-                                  ? "border-primary bg-primary text-white"
-                                  : "border-border bg-background text-muted hover:border-primary/60 hover:text-foreground"
-                              }`}
-                            >
-                              {pct}%
-                            </button>
-                          ))
-                        : NOMINAL_PRESETS.map((nom) => (
-                            <button
-                              key={nom}
-                              type="button"
-                              onClick={() =>
-                                patchRule(
-                                  rule.id,
-                                  isCustom,
-                                  { enabled: true, value: nom },
-                                  true,
-                                )
-                              }
-                              className={`tabular-money min-h-[40px] rounded-xl border px-3 text-xs font-bold transition ${
-                                rule.enabled && rule.value === nom
-                                  ? "border-primary bg-primary text-white"
-                                  : "border-border bg-background text-muted hover:border-primary/60 hover:text-foreground"
-                              }`}
-                            >
-                              {formatRupiah(nom)}
-                            </button>
-                          ))}
-                    </div>
+                        {/* Preset Cepat (1 Ketuk Langsung Aktif & Tersimpan) */}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[11px] font-semibold text-muted">
+                            Cepat:
+                          </span>
+                          {rule.type === "percent"
+                            ? PERCENT_PRESETS.map((pct) => (
+                                <button
+                                  key={pct}
+                                  type="button"
+                                  onClick={() =>
+                                    patchRule(
+                                      rule.id,
+                                      isCustom,
+                                      { enabled: true, value: pct },
+                                      true,
+                                    )
+                                  }
+                                  className={`tabular-nums min-h-[40px] rounded-xl border px-3 text-xs font-bold transition ${
+                                    rule.enabled && rule.value === pct
+                                      ? "border-primary bg-primary text-white"
+                                      : "border-border bg-background text-muted hover:border-primary/60 hover:text-foreground"
+                                  }`}
+                                >
+                                  {pct}%
+                                </button>
+                              ))
+                            : NOMINAL_PRESETS.map((nom) => (
+                                <button
+                                  key={nom}
+                                  type="button"
+                                  onClick={() =>
+                                    patchRule(
+                                      rule.id,
+                                      isCustom,
+                                      { enabled: true, value: nom },
+                                      true,
+                                    )
+                                  }
+                                  className={`tabular-money min-h-[40px] rounded-xl border px-3 text-xs font-bold transition ${
+                                    rule.enabled && rule.value === nom
+                                      ? "border-primary bg-primary text-white"
+                                      : "border-border bg-background text-muted hover:border-primary/60 hover:text-foreground"
+                                  }`}
+                                >
+                                  {formatRupiah(nom)}
+                                </button>
+                              ))}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
 
                 {/* Simulasi Harga Live */}
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-border bg-background px-4 py-3">
-                  <span className="text-xs text-muted">{meta.sampleLabel}</span>
-                  <div className="flex items-baseline gap-2">
-                    {sampleDiscount > 0 && (
-                      <span className="tabular-money text-xs text-muted line-through">
-                        {formatRupiah(meta.sampleAmount)}
-                      </span>
-                    )}
-                    <span className="tabular-money font-heading text-xl font-bold text-primary">
-                      {formatRupiah(sampleAfter)}
-                    </span>
+                {rule.type === "duration_percent" && rule.scope !== "fnb" ? (
+                  <div className="mt-4 rounded-2xl border border-border bg-background p-3.5">
+                    <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-muted">
+                      Simulasi Harga {meta.shortLabel} ({formatRupiah(meta.sampleAmount)}/jam)
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                      {DURATION_TIER_HOURS.map((h) => {
+                        const key = String(h) as DurationTierKey;
+                        const pct = rule.duration_tiers[key] ?? 0;
+                        const normal = meta.sampleAmount * h;
+                        const disc = calculateRuleDiscount(normal, rule, h);
+                        const after = Math.max(0, normal - disc);
+                        return (
+                          <div
+                            key={h}
+                            className="rounded-xl border border-border/70 bg-surface px-2.5 py-2 text-center"
+                          >
+                            <p className="text-[10px] font-bold uppercase text-muted">
+                              {h === 5 ? "5 Jam+" : `${h} Jam`}{" "}
+                              {pct > 0 && (
+                                <span className="text-status-available">
+                                  (-{pct}%)
+                                </span>
+                              )}
+                            </p>
+                            {disc > 0 && (
+                              <p className="tabular-money text-[10px] text-muted line-through">
+                                {formatRupiah(normal)}
+                              </p>
+                            )}
+                            <p className="tabular-money font-heading text-sm font-bold text-primary">
+                              {formatRupiah(after)}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-border bg-background px-4 py-3">
+                    <span className="text-xs text-muted">{meta.sampleLabel}</span>
+                    <div className="flex items-baseline gap-2">
+                      {sampleDiscount > 0 && (
+                        <span className="tabular-money text-xs text-muted line-through">
+                          {formatRupiah(meta.sampleAmount)}
+                        </span>
+                      )}
+                      <span className="tabular-money font-heading text-xl font-bold text-primary">
+                        {formatRupiah(sampleAfter)}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </section>
             );
           })}
@@ -855,6 +1091,9 @@ export default function DiscountManager({
                       type="button"
                       onClick={() => {
                         setNewScope(sc);
+                        if (sc === "fnb" && newType === "duration_percent") {
+                          setNewType("percent");
+                        }
                         const list = getTargetsForScope(sc);
                         setNewTargetIds(list[0] ? [list[0].id] : []);
                       }}
@@ -953,43 +1192,113 @@ export default function DiscountManager({
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
-                    Tipe Potongan
-                  </span>
-                  <div className="grid grid-cols-2 gap-1 rounded-xl border border-border bg-background p-1">
+              <div>
+                <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
+                  Tipe Potongan
+                </span>
+                <div
+                  className={`grid gap-1 rounded-xl border border-border bg-background p-1 ${
+                    newScope === "fnb" ? "grid-cols-2" : "grid-cols-3"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewType("percent");
+                      setNewValue("10");
+                    }}
+                    className={`min-h-[44px] rounded-lg text-xs font-bold ${
+                      newType === "percent"
+                        ? "bg-primary text-white"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    Persen (%)
+                  </button>
+                  {newScope !== "fnb" && (
                     <button
                       type="button"
-                      onClick={() => {
-                        setNewType("percent");
-                        setNewValue("10");
-                      }}
+                      onClick={() => setNewType("duration_percent")}
                       className={`min-h-[44px] rounded-lg text-xs font-bold ${
-                        newType === "percent"
+                        newType === "duration_percent"
                           ? "bg-primary text-white"
-                          : "text-muted"
+                          : "text-muted hover:text-foreground"
                       }`}
                     >
-                      Persen (%)
+                      Per Jam (1–5j)
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setNewType("nominal");
-                        setNewValue("5000");
-                      }}
-                      className={`min-h-[44px] rounded-lg text-xs font-bold ${
-                        newType === "nominal"
-                          ? "bg-primary text-white"
-                          : "text-muted"
-                      }`}
-                    >
-                      Rp
-                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewType("nominal");
+                      setNewValue("5000");
+                    }}
+                    className={`min-h-[44px] rounded-lg text-xs font-bold ${
+                      newType === "nominal"
+                        ? "bg-primary text-white"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    Rp
+                  </button>
+                </div>
+              </div>
+
+              {newType === "duration_percent" && newScope !== "fnb" ? (
+                <div className="space-y-2.5 rounded-2xl border border-border bg-background p-3.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold uppercase tracking-wider text-muted">
+                      Diskon Per Durasi (1–5 Jam)
+                    </span>
+                    <span className="text-[11px] text-muted">
+                      6–10 jam ikut 5 Jam+
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                    {DURATION_TIER_HOURS.map((hour) => {
+                      const key = String(hour) as DurationTierKey;
+                      const pctVal = newDurationTiers[key] ?? 0;
+                      return (
+                        <div
+                          key={hour}
+                          className="rounded-xl border border-border bg-surface p-2"
+                        >
+                          <label
+                            htmlFor={`new-tier-${hour}`}
+                            className="block text-[11px] font-bold uppercase text-muted"
+                          >
+                            {hour === 5 ? "5 Jam+" : `${hour} Jam`}
+                          </label>
+                          <div className="mt-1 flex items-center gap-1">
+                            <input
+                              id={`new-tier-${hour}`}
+                              type="text"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              maxLength={3}
+                              value={pctVal === 0 ? "" : String(pctVal)}
+                              onChange={(e) => {
+                                const digits = e.target.value.replace(/\D/g, "");
+                                const num = digits
+                                  ? Math.min(100, Number.parseInt(digits, 10))
+                                  : 0;
+                                setNewDurationTiers((prev) => ({
+                                  ...prev,
+                                  [key]: num,
+                                }));
+                              }}
+                              placeholder="0"
+                              className="tabular-nums min-h-[48px] w-full rounded-lg border border-border bg-background px-2 text-center text-sm font-bold text-foreground focus:border-primary focus:outline-none"
+                            />
+                            <span className="text-xs font-bold text-muted">%</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
-
+              ) : (
                 <div>
                   <label
                     htmlFor="new-promo-val"
@@ -1009,11 +1318,16 @@ export default function DiscountManager({
                     className="tabular-nums min-h-[50px] w-full rounded-xl border border-border bg-background px-4 text-base font-bold text-foreground focus:border-primary focus:outline-none"
                   />
                 </div>
-              </div>
+              )}
 
               <button
                 type="submit"
-                disabled={!newApplyAll && newTargetIds.length === 0}
+                disabled={
+                  (!newApplyAll && newTargetIds.length === 0) ||
+                  (newType === "duration_percent" &&
+                    newScope !== "fnb" &&
+                    !hasAnyDurationTierDiscount(newDurationTiers))
+                }
                 className="flex min-h-[54px] w-full items-center justify-center gap-2 rounded-2xl bg-status-available px-5 text-base font-extrabold text-[#042317] transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <Power className="h-5 w-5" />

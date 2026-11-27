@@ -876,6 +876,10 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                   }
                 }
 
+                const sessionDurationHours =
+                  session.billing_mode === "open_table"
+                    ? Math.floor(elapsedMin / 60)
+                    : Math.floor(session.duration_minutes / 60);
                 const estTableDisc =
                   session.booking_id && session.discount_amount > 0
                     ? Math.min(rawTableCost, session.discount_amount)
@@ -884,6 +888,7 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                         table.id,
                         table.category,
                         rawTableCost,
+                        sessionDurationHours,
                       ).discountAmount;
                 const estFnbDisc = session.fnb_promo_discount ?? 0;
                 liveBillEstimate = Math.max(

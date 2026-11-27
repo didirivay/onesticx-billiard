@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRightLeft,
@@ -16,11 +16,15 @@ import {
   X,
 } from "lucide-react";
 import {
+  MAX_BOOKING_DURATION_HOURS,
+  MIN_BOOKING_DURATION_HOURS,
+  PRESET_DURATION_OPTIONS,
   WIB_TIMEZONE,
   calculateEndTimeHHmm,
   formatRupiah,
   formatTimeHHmm,
   getCategoryLabel,
+  parseStrictDurationHours,
 } from "@/lib/format";
 import { getSessionExtendConstraint } from "@/lib/booking-conflict";
 import {
@@ -40,8 +44,6 @@ import type {
   KasirBookingItem,
   SessionFnbOrderItem,
 } from "@/types/kasir";
-
-const PACKAGE_HOURS = [1, 2, 3, 4, 5, 6] as const;
 
 function formatIsoTimeWib(iso: string): string {
   return new Intl.DateTimeFormat("id-ID", {
@@ -74,13 +76,93 @@ export function StartSessionModal({
   onClose,
   onSuccess,
 }: StartSessionModalProps) {
+  const customDurationInputRef = useRef<HTMLInputElement | null>(null);
   const [billingMode, setBillingMode] = useState<BillingMode>("open_table");
   const [durationHours, setDurationHours] = useState<number>(1);
+  const [isCustomDuration, setIsCustomDuration] = useState<boolean>(false);
+  const [customDurationInput, setCustomDurationInput] = useState<string>("");
+  const [customInputHint, setCustomInputHint] = useState<string | null>(null);
   const [customerName, setCustomerName] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const customDurationValidation = useMemo(() => {
+    if (!isCustomDuration) {
+      return { parsedHours: durationHours, error: null as string | null };
+    }
+    const trimmed = customDurationInput.trim();
+    if (!trimmed) {
+      return { parsedHours: null as number | null, error: null as string | null };
+    }
+    if (!/^\d+$/.test(trimmed)) {
+      return {
+        parsedHours: null,
+        error:
+          "Durasi hanya boleh angka bulat 1–10 (tidak boleh huruf atau simbol).",
+      };
+    }
+    if (trimmed.startsWith("0")) {
+      return {
+        parsedHours: null,
+        error: "Durasi harus bilangan asli 1 sampai 10 jam (tidak boleh 0).",
+      };
+    }
+    const parsed = parseStrictDurationHours(
+      trimmed,
+      MIN_BOOKING_DURATION_HOURS,
+      MAX_BOOKING_DURATION_HOURS,
+    );
+    if (parsed === null) {
+      return {
+        parsedHours: null,
+        error: `Durasi harus bilangan asli antara ${MIN_BOOKING_DURATION_HOURS} sampai ${MAX_BOOKING_DURATION_HOURS} jam.`,
+      };
+    }
+    return { parsedHours: parsed, error: null };
+  }, [customDurationInput, durationHours, isCustomDuration]);
+
+  const effectiveDurationHours = isCustomDuration
+    ? customDurationValidation.parsedHours
+    : durationHours;
+
+  const handleCustomKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key.length === 1 && !/^\d$/.test(e.key)) {
+      e.preventDefault();
+      setCustomInputHint(
+        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
+      );
+    }
+  };
+
+  const handleCustomChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value;
+    if (raw === "") {
+      setCustomDurationInput("");
+      setCustomInputHint(null);
+      setError(null);
+      return;
+    }
+    if (/[^0-9]/.test(raw)) {
+      setCustomInputHint(
+        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
+      );
+      return;
+    }
+    if (raw.length > 2) return;
+    setCustomInputHint(null);
+    setCustomDurationInput(raw);
+    setError(null);
+  };
+
   const handleStart = async () => {
+    if (billingMode === "package" && effectiveDurationHours === null) {
+      setError(
+        customDurationValidation.error ??
+          "Masukkan durasi paket berupa bilangan asli antara 1 sampai 10 jam.",
+      );
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -90,7 +172,8 @@ export function StartSessionModal({
         body: JSON.stringify({
           tableId: table.id,
           billingMode,
-          durationHours: billingMode === "package" ? durationHours : undefined,
+          durationHours:
+            billingMode === "package" ? effectiveDurationHours : undefined,
           customerName: customerName.trim() || "Walk-in",
         }),
       });
@@ -180,13 +263,18 @@ export function StartSessionModal({
                 Pilih Durasi Paket
               </p>
               <div className="grid grid-cols-3 gap-2.5 sm:grid-cols-6">
-                {PACKAGE_HOURS.map((h) => (
+                {PRESET_DURATION_OPTIONS.map((h) => (
                   <button
                     key={h}
                     type="button"
-                    onClick={() => setDurationHours(h)}
+                    onClick={() => {
+                      setIsCustomDuration(false);
+                      setDurationHours(h);
+                      setCustomInputHint(null);
+                      setError(null);
+                    }}
                     className={`tabular-nums min-h-[50px] rounded-xl border text-sm font-bold transition ${
-                      durationHours === h
+                      !isCustomDuration && durationHours === h
                         ? "border-primary bg-primary text-white"
                         : "border-border bg-background text-foreground hover:border-primary/60"
                     }`}
@@ -194,11 +282,76 @@ export function StartSessionModal({
                     {h} Jam
                   </button>
                 ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCustomDuration(true);
+                    setCustomInputHint(null);
+                    setError(null);
+                    window.requestAnimationFrame(() => {
+                      customDurationInputRef.current?.focus();
+                      customDurationInputRef.current?.select();
+                    });
+                  }}
+                  className={`min-h-[50px] rounded-xl border text-sm font-bold transition ${
+                    isCustomDuration
+                      ? "border-primary bg-primary text-white"
+                      : "border-border bg-background text-foreground hover:border-primary/60"
+                  }`}
+                >
+                  Custom
+                </button>
               </div>
+
+              {isCustomDuration && (
+                <div className="mt-3 rounded-xl border border-primary/40 bg-background p-3.5">
+                  <label
+                    htmlFor="walkin-custom-duration"
+                    className="mb-2 block text-xs font-semibold text-foreground"
+                  >
+                    Masukkan Durasi Custom (1–10 Jam)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={customDurationInputRef}
+                      id="walkin-custom-duration"
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      autoComplete="off"
+                      maxLength={2}
+                      value={customDurationInput}
+                      onKeyDown={handleCustomKeyDown}
+                      onChange={handleCustomChange}
+                      placeholder="Contoh: 6, 7, 8, 9, atau 10"
+                      className={`tabular-nums min-h-[50px] flex-1 rounded-xl border bg-surface px-3.5 text-sm font-semibold text-foreground placeholder:font-normal placeholder:text-muted/70 focus:outline-none ${
+                        customInputHint || customDurationValidation.error
+                          ? "border-status-occupied focus:border-status-occupied"
+                          : "border-border focus:border-primary"
+                      }`}
+                    />
+                    <span className="flex min-h-[50px] items-center rounded-xl border border-border bg-surface px-3.5 text-sm font-bold text-muted">
+                      Jam
+                    </span>
+                  </div>
+                  {customInputHint || customDurationValidation.error ? (
+                    <p className="mt-2 text-xs font-semibold text-status-occupied">
+                      {customInputHint ?? customDurationValidation.error}
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-[11px] text-muted">
+                      Hanya bilangan asli 1 sampai 10 (angka bulat, tanpa huruf).
+                    </p>
+                  )}
+                </div>
+              )}
+
               <p className="tabular-money mt-2.5 text-right text-sm text-muted">
                 Biaya Paket:{" "}
                 <strong className="font-heading text-lg text-primary">
-                  {formatRupiah(table.hourly_rate * durationHours)}
+                  {effectiveDurationHours !== null
+                    ? formatRupiah(table.hourly_rate * effectiveDurationHours)
+                    : "—"}
                 </strong>
               </p>
             </div>
@@ -231,9 +384,12 @@ export function StartSessionModal({
 
           <button
             type="button"
-            disabled={loading}
+            disabled={
+              loading ||
+              (billingMode === "package" && effectiveDurationHours === null)
+            }
             onClick={() => void handleStart()}
-            className="flex min-h-[54px] w-full items-center justify-center gap-2 rounded-2xl bg-primary px-5 text-base font-bold text-white shadow-lg shadow-primary/25 transition hover:bg-primary-hover active:scale-[0.99] disabled:opacity-50"
+            className="flex min-h-[54px] w-full items-center justify-center gap-2 rounded-2xl bg-primary px-5 text-base font-bold text-white shadow-lg shadow-primary/25 transition hover:bg-primary-hover active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {loading ? (
               <Loader2 className="h-5 w-5 animate-spin" />
@@ -645,11 +801,14 @@ export function CheckoutModal({
 
     const subtotal = tableCost + fnbTotal;
 
+    const effectiveDurationHours = Math.floor(durationMinutes / 60);
+
     const tableMatch = getBestTablePromoForTable(
       promoDiscounts,
       table.id,
       table.category,
       tableCost,
+      effectiveDurationHours,
     );
     const fnbMatch = calculateFnbOrdersPromoDiscount(promoDiscounts, fnbOrders);
 
@@ -680,8 +839,9 @@ export function CheckoutModal({
     );
     const total = Math.max(0, subtotal - discountAmount);
 
-    return {
+      return {
       durationMinutes,
+      effectiveDurationHours,
       tableCost,
       fnbCost: fnbTotal,
       subtotal,
@@ -916,7 +1076,7 @@ export function CheckoutModal({
                 <span>
                   {hasLockedBookingDiscount
                     ? "Promo Booking Meja"
-                    : `Promo ${table.name} (${livePricing.tablePromoRule?.label || (livePricing.tablePromoRule ? formatPromoShortTag(livePricing.tablePromoRule) : "Diskon")})`}
+                    : `Promo ${table.name} (${livePricing.tablePromoRule?.label || (livePricing.tablePromoRule ? formatPromoShortTag(livePricing.tablePromoRule, livePricing.effectiveDurationHours) : "Diskon")})`}
                 </span>
                 <span className="tabular-money font-semibold">
                   -{formatRupiah(livePricing.tablePromoDiscount)}

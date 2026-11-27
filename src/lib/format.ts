@@ -30,7 +30,32 @@ export const OPERATIONAL_START_SLOTS: readonly string[] = [
   "01:00",
 ] as const;
 
-export const DURATION_OPTIONS = [1, 2, 3, 4, 5, 6] as const;
+export const MIN_BOOKING_DURATION_HOURS = 1;
+export const MAX_BOOKING_DURATION_HOURS = 10;
+export const PRESET_DURATION_OPTIONS = [1, 2, 3, 4, 5] as const;
+
+/**
+ * Validasi ketat durasi bermain: hanya bilangan asli 1 sampai `max` (default 10).
+ * Menolak huruf, simbol, desimal, nol di depan, angka negatif, atau nilai di luar rentang.
+ */
+export function parseStrictDurationHours(
+  raw: unknown,
+  min = MIN_BOOKING_DURATION_HOURS,
+  max = MAX_BOOKING_DURATION_HOURS,
+): number | null {
+  if (typeof raw === "number") {
+    if (!Number.isInteger(raw) || raw < min || raw > max) return null;
+    return raw;
+  }
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!/^[1-9]\d*$/.test(trimmed)) return null;
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed < min || parsed > max) return null;
+    return parsed;
+  }
+  return null;
+}
 
 /**
  * Format nominal ke Rupiah Indonesia tanpa desimal, contoh: "Rp 50.000"
@@ -129,7 +154,7 @@ export function getMaxDurationHoursForStart(startTime: string): number {
   const remainingHours = Math.floor(
     (CLOSING_OPERATIONAL_MINUTES - startMinutes) / 60,
   );
-  return Math.min(6, Math.max(0, remainingHours));
+  return Math.min(MAX_BOOKING_DURATION_HOURS, Math.max(0, remainingHours));
 }
 
 /**

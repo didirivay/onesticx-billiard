@@ -5,7 +5,12 @@ import {
   findConflictingConfirmedBooking,
   formatBookingConflictMessage,
 } from "@/lib/booking-conflict";
-import { getWibNow } from "@/lib/format";
+import {
+  MAX_BOOKING_DURATION_HOURS,
+  MIN_BOOKING_DURATION_HOURS,
+  getWibNow,
+  parseStrictDurationHours,
+} from "@/lib/format";
 
 interface StartSessionBody {
   tableId?: unknown;
@@ -46,10 +51,14 @@ export async function POST(request: Request) {
       : "Walk-in";
   let billingMode: "open_table" | "package" =
     body.billingMode === "package" ? "package" : "open_table";
-  let durationHours =
-    typeof body.durationHours === "number"
-      ? Math.trunc(body.durationHours)
-      : Number.parseInt(String(body.durationHours ?? "1"), 10);
+  let durationHours: number | null =
+    billingMode === "package"
+      ? parseStrictDurationHours(
+          body.durationHours,
+          MIN_BOOKING_DURATION_HOURS,
+          MAX_BOOKING_DURATION_HOURS,
+        )
+      : 0;
   let bookingTotalPrice: number | null = null;
 
   // Jika check-in dari booking online
@@ -110,13 +119,21 @@ export async function POST(request: Request) {
 
   if (
     billingMode === "package" &&
-    (!Number.isInteger(durationHours) || durationHours < 1 || durationHours > 12)
+    (durationHours === null ||
+      !Number.isInteger(durationHours) ||
+      durationHours < MIN_BOOKING_DURATION_HOURS ||
+      durationHours > (bookingId ? 12 : MAX_BOOKING_DURATION_HOURS))
   ) {
     return NextResponse.json(
-      { error: "Durasi paket jam harus antara 1 sampai 12 jam." },
+      {
+        error:
+          "Durasi paket jam harus berupa bilangan asli antara 1 sampai 10 jam (angka bulat tanpa huruf).",
+      },
       { status: 400 },
     );
   }
+
+  const safeDurationHours = billingMode === "package" ? (durationHours ?? 1) : 0;
 
   const { data: table, error: tableError } = await supabase
     .from("tables")
@@ -161,7 +178,7 @@ export async function POST(request: Request) {
 
     const conflict = findConflictingConfirmedBooking(
       now.getTime(),
-      now.getTime() + durationHours * 3_600_000,
+      now.getTime() + safeDurationHours * 3_600_000,
       confirmedBookings ?? [],
     );
 
@@ -175,9 +192,10 @@ export async function POST(request: Request) {
     }
   }
 
-  const durationMinutes = billingMode === "package" ? durationHours * 60 : 0;
+  const durationMinutes =
+    billingMode === "package" ? safeDurationHours * 60 : 0;
   const fullPackageCost =
-    billingMode === "package" ? table.hourly_rate * durationHours : 0;
+    billingMode === "package" ? table.hourly_rate * safeDurationHours : 0;
   const preAppliedDiscount =
     billingMode === "package" && bookingTotalPrice !== null
       ? Math.max(0, fullPackageCost - bookingTotalPrice)
