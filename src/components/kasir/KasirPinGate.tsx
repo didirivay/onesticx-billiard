@@ -12,6 +12,7 @@ import {
   Loader2,
   Lock,
 } from "lucide-react";
+import { unlockKasirAudio } from "@/lib/kasir-alarm";
 
 interface KasirPinGateProps {
   isServerKeyConfigured: boolean;
@@ -49,6 +50,7 @@ export default function KasirPinGate({
       return;
     }
 
+    unlockKasirAudio();
     setLoading(true);
     setError(null);
 

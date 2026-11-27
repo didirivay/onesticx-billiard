@@ -16,6 +16,7 @@ import {
   Receipt,
   RefreshCw,
   Sparkles,
+  Square,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -34,12 +35,18 @@ import {
   getBestTablePromoForTable,
 } from "@/lib/promo-discounts";
 import {
+  getAlarmAudioSnapshot,
   getBrowserNotificationPermission,
   playBookingNotificationChime,
-  playOvertimeAlarmSound,
+  registerKasirAlarmWatcher,
   requestBrowserNotificationPermission,
+  startOvertimeAlarmLoop,
+  stopOvertimeAlarmLoop,
+  subscribeAlarmAudioState,
+  toggleTestOvertimeAlarm,
   triggerBrowserNotification,
   unlockKasirAudio,
+  type AlarmAudioSnapshot,
   type BrowserNotifPermission,
 } from "@/lib/kasir-alarm";
 import type { BilliardTable, TableCategory, TableStatus } from "@/types/database";
@@ -61,8 +68,6 @@ import {
 interface KasirDashboardProps {
   initialData: KasirDashboardData;
 }
-
-const OVERTIME_ALARM_REPEAT_MS = 25_000; // Bunyikan ulang tiap 25 detik sampai dimatikan / dibayar
 
 function formatSecondsHMS(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
@@ -123,9 +128,11 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [notifPermission, setNotifPermission] =
     useState<BrowserNotifPermission>("default");
-  const [mutedOvertimeIds, setMutedOvertimeIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [alarmAudioState, setAlarmAudioState] = useState<AlarmAudioSnapshot>({
+    isOvertimeRinging: false,
+    isTestPlaying: false,
+    isAutoplayBlocked: false,
+  });
   const [categoryFilter, setCategoryFilter] = useState<"all" | TableCategory>(
     "all",
   );
@@ -161,8 +168,7 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
-  // Pelacak alarm per sesi overtime agar tidak spam tiap detik & bisa diulang tiap 25 detik
-  const lastAlarmFiredAtRef = useRef<Map<string, number>>(new Map());
+  // Pelacak notifikasi browser per sesi overtime agar tidak spam tiap detik
   const browserNotifiedIdsRef = useRef<Set<string>>(new Set());
 
   const showToast = useCallback(
@@ -174,6 +180,19 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
     },
     [],
   );
+
+  // Daftarkan watcher alarm kasir & sinkronkan status audio MP3
+  useEffect(() => {
+    setAlarmAudioState(getAlarmAudioSnapshot());
+    const unsubAudio = subscribeAlarmAudioState(() => {
+      setAlarmAudioState(getAlarmAudioSnapshot());
+    });
+    const unregWatcher = registerKasirAlarmWatcher();
+    return () => {
+      unsubAudio();
+      unregWatcher();
+    };
+  }, []);
 
   // Baca status izin Notifikasi Browser saat mount
   useEffect(() => {
@@ -333,67 +352,42 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
     return list.sort((a, b) => a.table.sort_order - b.table.sort_order);
   }, [confirmedBookingsByTableId, data.activeSessions, nowMs, tableById]);
 
-  // Mesin Alarm & Notifikasi Waktu Habis (otomatis berbunyi saat 00:00:00 & ulang tiap 25 dtk)
+  // Mesin Alarm & Notifikasi Waktu Habis (putar MP3 terus-menerus hingga pembayaran selesai)
   useEffect(() => {
     const activeOvertimeIds = new Set(overtimeAlerts.map((a) => a.session.id));
 
-    // Bersihkan tracker jika sesi sudah dibayar atau baru saja ditambah jamnya
-    for (const trackedId of Array.from(lastAlarmFiredAtRef.current.keys())) {
-      if (!activeOvertimeIds.has(trackedId)) {
-        lastAlarmFiredAtRef.current.delete(trackedId);
-      }
-    }
+    // Bersihkan pelacak notifikasi jika sesi sudah selesai dibayar atau diperpanjang
     for (const notifiedId of Array.from(browserNotifiedIdsRef.current)) {
       if (!activeOvertimeIds.has(notifiedId)) {
         browserNotifiedIdsRef.current.delete(notifiedId);
       }
     }
-    setMutedOvertimeIds((prev) => {
-      let changed = false;
-      const next = new Set(prev);
-      for (const id of prev) {
-        if (!activeOvertimeIds.has(id)) {
-          next.delete(id);
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
 
-    if (overtimeAlerts.length === 0) return;
-
-    let shouldRingAlarm = false;
+    if (overtimeAlerts.length === 0) {
+      stopOvertimeAlarmLoop();
+      return;
+    }
 
     for (const item of overtimeAlerts) {
       const sid = item.session.id;
 
-      // 1. Notifikasi Browser & Toast seketika pertama kali meja mencapai 00:00:00
+      // Notifikasi Browser & Toast seketika pertama kali meja mencapai 00:00:00
       if (!browserNotifiedIdsRef.current.has(sid)) {
         browserNotifiedIdsRef.current.add(sid);
         triggerBrowserNotification({
           title: `⏰ WAKTU HABIS — ${item.table.name}!`,
-          body: `Sesi Paket ${item.session.customer_name} di ${item.table.name} telah habis. Segera selesaikan atau tambah jam.`,
+          body: `Waktu bermain ${item.session.customer_name} di ${item.table.name} telah habis. Selesaikan pembayaran untuk mematikan alarm.`,
           tag: `overtime-${sid}`,
         });
         showToast(
           "error",
-          `⏰ WAKTU HABIS! ${item.table.name} (${item.session.customer_name}) — segera selesaikan atau tambah jam.`,
+          `⏰ WAKTU HABIS! ${item.table.name} (${item.session.customer_name}) — alarm aktif hingga pembayaran selesai.`,
         );
       }
-
-      // 2. Bunyikan alarm (langsung saat pertama kali & ulang tiap 25 detik jika belum dimatikan)
-      if (!soundEnabled || mutedOvertimeIds.has(sid)) continue;
-      const lastFired = lastAlarmFiredAtRef.current.get(sid) ?? 0;
-      if (nowMs - lastFired >= OVERTIME_ALARM_REPEAT_MS) {
-        lastAlarmFiredAtRef.current.set(sid, nowMs);
-        shouldRingAlarm = true;
-      }
     }
 
-    if (shouldRingAlarm) {
-      playOvertimeAlarmSound();
-    }
-  }, [mutedOvertimeIds, nowMs, overtimeAlerts, showToast, soundEnabled]);
+    startOvertimeAlarmLoop();
+  }, [overtimeAlerts, showToast]);
 
   const handleToggleBrowserNotifications = async () => {
     unlockKasirAudio();
@@ -433,31 +427,25 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
 
   const handleTestAlarm = () => {
     unlockKasirAudio();
-    playOvertimeAlarmSound();
-    triggerBrowserNotification({
-      title: "⏰ Tes Alarm — Kasir 1St!cx Billiard",
-      body: "Suara alarm dan notifikasi waktu habis meja berfungsi normal!",
-      tag: "alarm-test",
-    });
-    showToast("info", "Tes suara alarm waktu habis dibunyikan!");
-  };
-
-  const handleMuteOvertimeSession = (sessionId: string) => {
-    setMutedOvertimeIds((prev) => {
-      const next = new Set(prev);
-      next.add(sessionId);
-      return next;
-    });
-  };
-
-  const handleMuteAllOvertime = () => {
-    setMutedOvertimeIds((prev) => {
-      const next = new Set(prev);
-      for (const item of overtimeAlerts) {
-        next.add(item.session.id);
-      }
-      return next;
-    });
+    if (overtimeAlerts.length > 0) {
+      startOvertimeAlarmLoop();
+      showToast(
+        "error",
+        "Alarm waktu habis sedang aktif — selesaikan pembayaran untuk mematikannya.",
+      );
+      return;
+    }
+    const started = toggleTestOvertimeAlarm();
+    if (started) {
+      triggerBrowserNotification({
+        title: "⏰ Tes Alarm — Kasir 1St!cx Billiard",
+        body: "Suara alarm MP3 dan notifikasi waktu habis meja berfungsi normal!",
+        tag: "alarm-test",
+      });
+      showToast("info", "Tes suara alarm dibunyikan! Tekan lagi untuk menghentikan.");
+    } else {
+      showToast("info", "Tes suara alarm dihentikan.");
+    }
   };
 
   const availableTables = useMemo(
@@ -557,10 +545,6 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
     }
   };
 
-  const hasUnmutedOvertime = overtimeAlerts.some(
-    (item) => !mutedOvertimeIds.has(item.session.id),
-  );
-
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       {/* Shared Top Navigation Bar */}
@@ -612,11 +596,25 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
             <button
               type="button"
               onClick={handleTestAlarm}
-              title="Uji bunyi alarm waktu habis"
-              className="hidden min-h-[48px] items-center gap-1.5 rounded-xl border border-border bg-background px-3 text-xs font-bold text-foreground transition hover:border-primary/60 hover:text-primary sm:flex"
+              title={
+                alarmAudioState.isTestPlaying
+                  ? "Hentikan pratinjau suara alarm"
+                  : "Uji bunyi alarm waktu habis"
+              }
+              className={`hidden min-h-[48px] items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition sm:flex ${
+                alarmAudioState.isTestPlaying
+                  ? "border-status-occupied bg-status-occupied text-white hover:brightness-110"
+                  : "border-border bg-background text-foreground hover:border-primary/60 hover:text-primary"
+              }`}
             >
-              <AlarmClock className="h-4 w-4 text-primary" />
-              <span className="hidden xl:inline">Tes Alarm</span>
+              {alarmAudioState.isTestPlaying ? (
+                <Square className="h-3.5 w-3.5 fill-current" />
+              ) : (
+                <AlarmClock className="h-4 w-4 text-primary" />
+              )}
+              <span className="hidden xl:inline">
+                {alarmAudioState.isTestPlaying ? "Stop Tes" : "Tes Alarm"}
+              </span>
             </button>
 
             <button
@@ -627,8 +625,8 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
               }}
               title={
                 soundEnabled
-                  ? "Matikan semua suara alarm & notifikasi"
-                  : "Aktifkan suara alarm & notifikasi"
+                  ? "Suara notifikasi booking aktif (alarm waktu habis tetap menyala hingga dibayar)"
+                  : "Suara notifikasi booking dimatikan (alarm waktu habis tetap menyala hingga dibayar)"
               }
               className="flex min-h-[48px] min-w-[48px] items-center justify-center rounded-xl border border-border bg-background text-foreground transition hover:border-primary/60"
             >
@@ -682,98 +680,88 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-status-occupied/30 pb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-status-occupied text-white">
-                    <AlarmClock
-                      className={`h-6 w-6 ${hasUnmutedOvertime && soundEnabled ? "animate-bounce" : ""}`}
-                    />
+                    <AlarmClock className="h-6 w-6 animate-bounce" />
                   </div>
                   <div>
                     <p className="font-heading text-lg font-bold uppercase tracking-wide text-status-occupied">
                       Alarm Waktu Habis ({overtimeAlerts.length} Meja)
                     </p>
                     <p className="text-xs text-foreground/85">
-                      {hasUnmutedOvertime && soundEnabled
-                        ? "Alarm otomatis berbunyi ulang tiap 25 detik hingga diselesaikan atau dimatikan."
-                        : "Alarm suara untuk meja di bawah sedang disenyapkan."}
+                      {alarmAudioState.isAutoplayBlocked
+                        ? "Browser menahan suara otomatis. Ketuk tombol di kanan atau layar mana saja untuk membunyikan alarm."
+                        : "Alarm berbunyi terus hingga pembayaran diselesaikan (atau waktu ditambah)."}
                     </p>
                   </div>
                 </div>
 
-                {hasUnmutedOvertime && soundEnabled && (
+                {alarmAudioState.isAutoplayBlocked ? (
                   <button
                     type="button"
-                    onClick={handleMuteAllOvertime}
+                    onClick={() => {
+                      unlockKasirAudio();
+                      startOvertimeAlarmLoop();
+                    }}
                     className="flex min-h-[48px] items-center gap-2 rounded-xl bg-status-occupied px-4 text-xs font-extrabold uppercase tracking-wide text-white transition hover:brightness-110 active:scale-95"
                   >
-                    <VolumeX className="h-4 w-4" />
-                    <span>Matikan Semua Alarm</span>
+                    <Volume2 className="h-4 w-4" />
+                    <span>Bunyikan Alarm</span>
                   </button>
+                ) : (
+                  <span className="inline-flex min-h-[42px] items-center gap-2 rounded-xl border border-status-occupied/50 bg-status-occupied/20 px-3.5 text-xs font-extrabold uppercase tracking-wide text-status-occupied">
+                    <Volume2 className="h-4 w-4 animate-pulse" />
+                    <span>Menunggu Pembayaran</span>
+                  </span>
                 )}
               </div>
 
               <div className="mt-3 space-y-2.5">
                 {overtimeAlerts.map(
-                  ({ table, session, overtimeSec, extendBlocked }) => {
-                    const isMuted = mutedOvertimeIds.has(session.id);
-                    return (
-                      <div
-                        key={session.id}
-                        className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-status-occupied/40 bg-background/90 px-3.5 py-2.5"
-                      >
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-heading text-lg font-bold text-foreground">
-                              {table.name}
-                            </span>
-                            <span className="text-xs font-semibold text-muted">
-                              • {session.customer_name}
-                            </span>
-                            <span className="tabular-timer rounded-md bg-status-occupied/20 px-2 py-0.5 text-xs font-extrabold text-status-occupied">
-                              Lewat +{formatSecondsHMS(overtimeSec)}
-                            </span>
-                          </div>
-                        </div>
-
+                  ({ table, session, overtimeSec, extendBlocked }) => (
+                    <div
+                      key={session.id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-status-occupied/40 bg-background/90 px-3.5 py-2.5"
+                    >
+                      <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          {!isMuted && soundEnabled && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleMuteOvertimeSession(session.id)
-                              }
-                              className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-status-occupied/50 bg-surface px-3 text-xs font-bold text-status-occupied hover:bg-status-occupied hover:text-white"
-                            >
-                              <VolumeX className="h-4 w-4" />
-                              <span>Diamkan</span>
-                            </button>
-                          )}
+                          <span className="font-heading text-lg font-bold text-foreground">
+                            {table.name}
+                          </span>
+                          <span className="text-xs font-semibold text-muted">
+                            • {session.customer_name}
+                          </span>
+                          <span className="tabular-timer rounded-md bg-status-occupied/20 px-2 py-0.5 text-xs font-extrabold text-status-occupied">
+                            Lewat +{formatSecondsHMS(overtimeSec)}
+                          </span>
+                        </div>
+                      </div>
 
-                          {!extendBlocked && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExtendModalTarget({ table, session })
-                              }
-                              className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-border bg-surface px-3 text-xs font-bold text-foreground hover:border-primary/60 hover:text-primary"
-                            >
-                              <Plus className="h-4 w-4" />
-                              <span>Tambah Jam</span>
-                            </button>
-                          )}
-
+                      <div className="flex flex-wrap items-center gap-2">
+                        {!extendBlocked && (
                           <button
                             type="button"
                             onClick={() =>
-                              setCheckoutModalTarget({ table, session })
+                              setExtendModalTarget({ table, session })
                             }
-                            className="flex min-h-[44px] items-center gap-1.5 rounded-xl bg-primary px-3.5 text-xs font-bold text-white hover:bg-primary-hover"
+                            className="flex min-h-[48px] items-center gap-1.5 rounded-xl border border-border bg-surface px-3.5 text-xs font-bold text-foreground hover:border-primary/60 hover:text-primary"
                           >
-                            <Receipt className="h-4 w-4" />
-                            <span>Selesai &amp; Bayar</span>
+                            <Plus className="h-4 w-4" />
+                            <span>Tambah Jam</span>
                           </button>
-                        </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCheckoutModalTarget({ table, session })
+                          }
+                          className="flex min-h-[48px] items-center gap-1.5 rounded-xl bg-primary px-4 text-xs font-bold text-white hover:bg-primary-hover"
+                        >
+                          <Receipt className="h-4 w-4" />
+                          <span>Selesai &amp; Bayar</span>
+                        </button>
                       </div>
-                    );
-                  },
+                    </div>
+                  ),
                 )}
               </div>
             </section>
@@ -884,7 +872,7 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                   } else {
                     isOvertime = true;
                     timerLabel = `+${formatSecondsHMS(Math.abs(remainingSec))}`;
-                    timerSubtext = "WAKTU HABIS — Alarm Aktif!";
+                    timerSubtext = "WAKTU HABIS — Menunggu Pembayaran!";
                   }
                 }
 
@@ -905,8 +893,6 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
               }
 
               const accent = getCardStatusAccent(table.status, isOvertime);
-              const isSessionAlarmMuted =
-                session !== null && mutedOvertimeIds.has(session.id);
 
               return (
                 <article
@@ -975,18 +961,11 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                             {timerLabel}
                           </p>
 
-                          {isOvertime && !isSessionAlarmMuted && soundEnabled && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleMuteOvertimeSession(session.id)
-                              }
-                              title="Matikan bunyi alarm meja ini"
-                              className="inline-flex min-h-[38px] items-center gap-1 rounded-lg bg-status-occupied/20 px-2.5 text-[11px] font-bold text-status-occupied hover:bg-status-occupied hover:text-white"
-                            >
-                              <VolumeX className="h-3.5 w-3.5" />
-                              <span>Diam</span>
-                            </button>
+                          {isOvertime && (
+                            <span className="inline-flex items-center gap-1 rounded-lg bg-status-occupied/20 px-2.5 py-1 text-[11px] font-bold text-status-occupied">
+                              <Volume2 className="h-3.5 w-3.5 animate-pulse" />
+                              <span>Alarm Aktif</span>
+                            </span>
                           )}
                         </div>
 
@@ -997,9 +976,7 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
                               : "text-muted"
                           }`}
                         >
-                          {isOvertime && isSessionAlarmMuted
-                            ? "WAKTU HABIS (Alarm disenyapkan)"
-                            : timerSubtext}
+                          {timerSubtext}
                         </p>
 
                         {/* Penanda F&B aktif */}
@@ -1290,9 +1267,18 @@ export default function KasirDashboard({ initialData }: KasirDashboardProps) {
           nowMs={nowMs}
           onClose={() => setCheckoutModalTarget(null)}
           onSuccess={async () => {
+            const paidSessionId = checkoutModalTarget.session.id;
+            const paidTableName = checkoutModalTarget.table.name;
+            // Hapus sesi dari daftar aktif seketika agar alarm langsung mati saat pembayaran lunas
+            setData((prev) => ({
+              ...prev,
+              activeSessions: prev.activeSessions.filter(
+                (s) => s.id !== paidSessionId,
+              ),
+            }));
             showToast(
               "success",
-              `Pembayaran ${checkoutModalTarget.table.name} tercatat lunas.`,
+              `Pembayaran ${paidTableName} tercatat lunas.`,
             );
             await refreshDashboard();
           }}

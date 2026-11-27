@@ -13,13 +13,19 @@ import {
   Percent,
   Radio,
   Settings,
-  VolumeX,
+  Volume2,
 } from "lucide-react";
 import { WIB_TIMEZONE } from "@/lib/format";
 import {
-  playOvertimeAlarmSound,
+  getAlarmAudioSnapshot,
+  registerKasirAlarmWatcher,
+  startOvertimeAlarmLoop,
+  stopAllOvertimeAudio,
+  stopOvertimeAlarmLoop,
+  subscribeAlarmAudioState,
   triggerBrowserNotification,
   unlockKasirAudio,
+  type AlarmAudioSnapshot,
 } from "@/lib/kasir-alarm";
 import type { KasirDashboardData } from "@/types/kasir";
 
@@ -59,8 +65,6 @@ const NAV_ITEMS: Array<{
   },
 ];
 
-const BG_ALARM_REPEAT_MS = 25_000;
-
 function formatWibClockHMS(ms: number): string {
   return new Intl.DateTimeFormat("id-ID", {
     timeZone: WIB_TIMEZONE,
@@ -90,11 +94,28 @@ export default function KasirTopBar({
 
   // Watcher ringan saat kasir sedang berada di halaman selain /kasir (F&B, Diskon, Laporan, Pengaturan)
   const [bgSnapshot, setBgSnapshot] = useState<KasirDashboardData | null>(null);
-  const [bgMutedIds, setBgMutedIds] = useState<Set<string>>(() => new Set());
-  const bgLastAlarmRef = useRef<Map<string, number>>(new Map());
+  const [alarmAudioState, setAlarmAudioState] = useState<AlarmAudioSnapshot>({
+    isOvertimeRinging: false,
+    isTestPlaying: false,
+    isAutoplayBlocked: false,
+  });
   const bgNotifiedRef = useRef<Set<string>>(new Set());
 
-  // Buka kunci AudioContext otomatis saat interaksi sentuhan/klik pertama kasir
+  // Sinkronkan status audio alarm MP3
+  useEffect(() => {
+    setAlarmAudioState(getAlarmAudioSnapshot());
+    return subscribeAlarmAudioState(() => {
+      setAlarmAudioState(getAlarmAudioSnapshot());
+    });
+  }, []);
+
+  // Daftarkan watcher alarm ketika kasir berada di tab kasir selain Dashboard Meja
+  useEffect(() => {
+    if (activeTab === "meja") return;
+    return registerKasirAlarmWatcher();
+  }, [activeTab]);
+
+  // Buka kunci AudioContext & audio MP3 otomatis saat interaksi sentuhan/klik pertama kasir
   useEffect(() => {
     const handleUnlock = () => unlockKasirAudio();
     window.addEventListener("pointerdown", handleUnlock, { passive: true });
@@ -161,43 +182,36 @@ export default function KasirTopBar({
   }, [activeTab, bgSnapshot, nowMs]);
 
   useEffect(() => {
-    if (activeTab === "meja" || bgOvertimeAlerts.length === 0) return;
+    if (activeTab === "meja" || !bgSnapshot) return;
 
-    let shouldRing = false;
+    const activeIds = new Set(bgOvertimeAlerts.map((a) => a.sessionId));
+    for (const id of Array.from(bgNotifiedRef.current)) {
+      if (!activeIds.has(id)) {
+        bgNotifiedRef.current.delete(id);
+      }
+    }
+
+    if (bgOvertimeAlerts.length === 0) {
+      stopOvertimeAlarmLoop();
+      return;
+    }
+
     for (const item of bgOvertimeAlerts) {
       if (!bgNotifiedRef.current.has(item.sessionId)) {
         bgNotifiedRef.current.add(item.sessionId);
         triggerBrowserNotification({
           title: `⏰ WAKTU HABIS — ${item.tableName}!`,
-          body: `Sesi Paket ${item.customerName} di ${item.tableName} telah berakhir. Klik untuk kembali ke Dashboard Meja.`,
+          body: `Waktu bermain ${item.customerName} di ${item.tableName} telah habis. Selesaikan pembayaran untuk mematikan alarm.`,
           tag: `overtime-${item.sessionId}`,
         });
       }
-
-      if (bgMutedIds.has(item.sessionId)) continue;
-      const lastFired = bgLastAlarmRef.current.get(item.sessionId) ?? 0;
-      if (nowMs - lastFired >= BG_ALARM_REPEAT_MS) {
-        bgLastAlarmRef.current.set(item.sessionId, nowMs);
-        shouldRing = true;
-      }
     }
 
-    if (shouldRing) {
-      playOvertimeAlarmSound();
-    }
-  }, [activeTab, bgMutedIds, bgOvertimeAlerts, nowMs]);
-
-  const handleMuteBgAll = () => {
-    setBgMutedIds((prev) => {
-      const next = new Set(prev);
-      for (const item of bgOvertimeAlerts) {
-        next.add(item.sessionId);
-      }
-      return next;
-    });
-  };
+    startOvertimeAlarmLoop();
+  }, [activeTab, bgOvertimeAlerts, bgSnapshot]);
 
   const handleLogout = async () => {
+    stopAllOvertimeAudio();
     await fetch("/api/kasir/auth/logout", { method: "POST" });
     router.refresh();
   };
@@ -321,23 +335,29 @@ export default function KasirTopBar({
                   (a) =>
                     `${a.tableName} (${a.customerName} ${formatOvertimeHMS(a.overtimeSec)})`,
                 )
-                .join(" • ")}
+                .join(" • ")}{" "}
+              — Selesaikan pembayaran untuk mematikan alarm
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleMuteBgAll}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-black/25 px-3 text-xs font-bold text-white hover:bg-black/40"
-            >
-              <VolumeX className="h-4 w-4" />
-              <span>Senyapkan</span>
-            </button>
+            {alarmAudioState.isAutoplayBlocked && (
+              <button
+                type="button"
+                onClick={() => {
+                  unlockKasirAudio();
+                  startOvertimeAlarmLoop();
+                }}
+                className="inline-flex min-h-[48px] items-center gap-1.5 rounded-xl bg-black/30 px-3.5 text-xs font-extrabold text-white hover:bg-black/45"
+              >
+                <Volume2 className="h-4 w-4" />
+                <span>Bunyikan Alarm</span>
+              </button>
+            )}
             <Link
               href="/kasir"
-              className="inline-flex min-h-[40px] items-center rounded-xl bg-white px-3.5 text-xs font-extrabold text-[#121212] hover:bg-white/90"
+              className="inline-flex min-h-[48px] items-center rounded-xl bg-white px-4 text-xs font-extrabold text-[#121212] hover:bg-white/90"
             >
-              Buka Meja →
+              Buka Meja &amp; Bayar →
             </Link>
           </div>
         </div>
