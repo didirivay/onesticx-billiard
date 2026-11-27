@@ -10,7 +10,6 @@ import { getBestTablePromoForTable } from "@/lib/promo-discounts";
 import { loadPromoDiscountsServer } from "@/lib/promo-discounts-server";
 import {
   CLOSING_OPERATIONAL_MINUTES,
-  MAX_BOOKING_DURATION_HOURS,
   MIN_BOOKING_DURATION_HOURS,
   OPERATIONAL_START_SLOTS,
   WIB_TIMEZONE,
@@ -64,7 +63,6 @@ export async function POST(request: Request) {
   const durationHours = parseStrictDurationHours(
     body.durationHours,
     MIN_BOOKING_DURATION_HOURS,
-    MAX_BOOKING_DURATION_HOURS,
   );
 
   if (!tableId) {
@@ -120,8 +118,7 @@ export async function POST(request: Request) {
   if (durationHours === null) {
     return NextResponse.json(
       {
-        error:
-          "Durasi bermain harus berupa bilangan asli antara 1 sampai 10 jam (angka bulat tanpa huruf).",
+        error: "Durasi bermain harus berupa angka bulat minimal 1 jam.",
       },
       { status: 400 },
     );

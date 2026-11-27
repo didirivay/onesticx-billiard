@@ -16,7 +16,6 @@ import {
   X,
 } from "lucide-react";
 import {
-  MAX_BOOKING_DURATION_HOURS,
   MIN_BOOKING_DURATION_HOURS,
   PRESET_DURATION_OPTIONS,
   WIB_TIMEZONE,
@@ -97,25 +96,24 @@ export function StartSessionModal({
     if (!/^\d+$/.test(trimmed)) {
       return {
         parsedHours: null,
-        error:
-          "Durasi hanya boleh angka bulat 1–10 (tidak boleh huruf atau simbol).",
+        error: "Durasi hanya boleh diisi angka bulat.",
       };
     }
     if (trimmed.startsWith("0")) {
       return {
         parsedHours: null,
-        error: "Durasi harus bilangan asli 1 sampai 10 jam (tidak boleh 0).",
+        error: "Durasi harus angka bulat minimal 1 jam.",
       };
     }
     const parsed = parseStrictDurationHours(
       trimmed,
       MIN_BOOKING_DURATION_HOURS,
-      MAX_BOOKING_DURATION_HOURS,
+      999,
     );
     if (parsed === null) {
       return {
         parsedHours: null,
-        error: `Durasi harus bilangan asli antara ${MIN_BOOKING_DURATION_HOURS} sampai ${MAX_BOOKING_DURATION_HOURS} jam.`,
+        error: "Durasi harus angka bulat minimal 1 jam.",
       };
     }
     return { parsedHours: parsed, error: null };
@@ -129,9 +127,7 @@ export function StartSessionModal({
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key.length === 1 && !/^\d$/.test(e.key)) {
       e.preventDefault();
-      setCustomInputHint(
-        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
-      );
+      setCustomInputHint("Durasi hanya boleh diisi angka bulat.");
     }
   };
 
@@ -144,12 +140,10 @@ export function StartSessionModal({
       return;
     }
     if (/[^0-9]/.test(raw)) {
-      setCustomInputHint(
-        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
-      );
+      setCustomInputHint("Durasi hanya boleh diisi angka bulat.");
       return;
     }
-    if (raw.length > 2) return;
+    if (raw.length > 3) return;
     setCustomInputHint(null);
     setCustomDurationInput(raw);
     setError(null);
@@ -159,7 +153,7 @@ export function StartSessionModal({
     if (billingMode === "package" && effectiveDurationHours === null) {
       setError(
         customDurationValidation.error ??
-          "Masukkan durasi paket berupa bilangan asli antara 1 sampai 10 jam.",
+          "Masukkan durasi bermain berupa angka bulat minimal 1 jam.",
       );
       return;
     }
@@ -309,7 +303,7 @@ export function StartSessionModal({
                     htmlFor="walkin-custom-duration"
                     className="mb-2 block text-xs font-semibold text-foreground"
                   >
-                    Masukkan Durasi Custom (1–10 Jam)
+                    Masukkan Durasi
                   </label>
                   <div className="flex items-center gap-2">
                     <input
@@ -319,11 +313,11 @@ export function StartSessionModal({
                       inputMode="numeric"
                       pattern="[0-9]*"
                       autoComplete="off"
-                      maxLength={2}
+                      maxLength={3}
                       value={customDurationInput}
                       onKeyDown={handleCustomKeyDown}
                       onChange={handleCustomChange}
-                      placeholder="Contoh: 6, 7, 8, 9, atau 10"
+                      placeholder="Contoh: 6"
                       className={`tabular-nums min-h-[50px] flex-1 rounded-xl border bg-surface px-3.5 text-sm font-semibold text-foreground placeholder:font-normal placeholder:text-muted/70 focus:outline-none ${
                         customInputHint || customDurationValidation.error
                           ? "border-status-occupied focus:border-status-occupied"
@@ -334,13 +328,9 @@ export function StartSessionModal({
                       Jam
                     </span>
                   </div>
-                  {customInputHint || customDurationValidation.error ? (
+                  {(customInputHint || customDurationValidation.error) && (
                     <p className="mt-2 text-xs font-semibold text-status-occupied">
                       {customInputHint ?? customDurationValidation.error}
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-[11px] text-muted">
-                      Hanya bilangan asli 1 sampai 10 (angka bulat, tanpa huruf).
                     </p>
                   )}
                 </div>

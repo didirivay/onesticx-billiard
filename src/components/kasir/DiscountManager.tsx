@@ -20,7 +20,7 @@ import {
 import KasirTopBar from "@/components/kasir/KasirTopBar";
 import { formatRupiah } from "@/lib/format";
 import {
-  DURATION_TIER_HOURS,
+  DURATION_TIER_KEYS,
   calculateRuleDiscount,
   formatPromoShortTag,
   hasAnyDurationTierDiscount,
@@ -94,16 +94,16 @@ const DURATION_TIER_PRESETS: Array<{
   tiers: DurationDiscountTiers;
 }> = [
   {
-    label: "Bertahap 5–25%",
-    tiers: { "1": 5, "2": 10, "3": 15, "4": 20, "5": 25 },
+    label: "Bertahap 5–30%",
+    tiers: { "1": 5, "2": 10, "3": 15, "4": 20, "5": 25, custom: 30 },
   },
   {
-    label: "Mulai 2j (10–25%)",
-    tiers: { "1": 0, "2": 10, "3": 15, "4": 20, "5": 25 },
+    label: "Mulai 2j (10–30%)",
+    tiers: { "1": 0, "2": 10, "3": 15, "4": 20, "5": 25, custom: 30 },
   },
   {
-    label: "Bertahap 10–30%",
-    tiers: { "1": 10, "2": 15, "3": 20, "4": 25, "5": 30 },
+    label: "Bertahap 10–35%",
+    tiers: { "1": 10, "2": 15, "3": 20, "4": 25, "5": 30, custom: 35 },
   },
 ];
 
@@ -113,7 +113,16 @@ const DEFAULT_STARTER_TIERS: DurationDiscountTiers = {
   "3": 15,
   "4": 20,
   "5": 25,
+  custom: 30,
 };
+
+function getTierDisplayLabel(key: DurationTierKey): string {
+  return key === "custom" ? "Custom" : `${key} Jam`;
+}
+
+function getTierSimulationHours(key: DurationTierKey): number {
+  return key === "custom" ? 6 : Number(key);
+}
 
 export default function DiscountManager({
   initialDiscounts,
@@ -312,21 +321,20 @@ export default function DiscountManager({
   };
 
   const openCreateModal = () => {
-    const indoorTargets = getTargetsForScope("indoor");
     setNewScope("indoor");
     setNewLabel("");
-    setNewType("percent");
+    setNewType("duration_percent");
     setNewValue("10");
     setNewDurationTiers({ ...DEFAULT_STARTER_TIERS });
-    setNewApplyAll(false);
-    setNewTargetIds(indoorTargets[0] ? [indoorTargets[0].id] : []);
+    setNewApplyAll(true);
+    setNewTargetIds([]);
     setCreateModalOpen(true);
   };
 
   const handleCreateCustomRule = (e: React.FormEvent) => {
     e.preventDefault();
-    const isDurationMode =
-      newType === "duration_percent" && newScope !== "fnb";
+    const isTableScope = newScope !== "fnb";
+    const isDurationMode = newType === "duration_percent" && isTableScope;
     const numeric = Number.parseInt(newValue.replace(/\D/g, ""), 10) || 0;
 
     if (isDurationMode) {
@@ -336,6 +344,7 @@ export default function DiscountManager({
     }
 
     const clamped = newType === "percent" ? Math.min(100, numeric) : numeric;
+    const applyAll = isTableScope ? true : newApplyAll;
     const rule: CategoryDiscountRule = {
       id: `custom-${Date.now().toString(36)}`,
       scope: newScope,
@@ -346,8 +355,8 @@ export default function DiscountManager({
       duration_tiers: isDurationMode
         ? { ...newDurationTiers }
         : makeDefaultDurationTiers(),
-      apply_to_all: newApplyAll,
-      target_ids: newApplyAll ? [] : newTargetIds,
+      apply_to_all: applyAll,
+      target_ids: applyAll ? [] : newTargetIds,
     };
 
     const nextConfig: PromoDiscountsConfig = {
@@ -379,7 +388,7 @@ export default function DiscountManager({
               <strong className="text-foreground">
                 diskon langsung tersimpan &amp; langsung bisa dipakai
               </strong>{" "}
-              untuk semua meja atau <strong>hanya meja / menu F&amp;B tertentu</strong>.
+              untuk semua meja per kategori (termasuk diskon per jam &amp; custom) maupun menu F&amp;B.
             </p>
           </div>
 
@@ -458,13 +467,21 @@ export default function DiscountManager({
             const targets = getTargetsForScope(rule.scope);
             const effective = isRuleEffective(rule);
             const shortTag = formatPromoShortTag(rule);
+            const liveSampleHourly =
+              rule.scope === "fnb"
+                ? meta.sampleAmount
+                : (tables.find((t) => t.category === rule.scope)?.hourly_rate ??
+                  meta.sampleAmount);
             const sampleDiscount = calculateRuleDiscount(
-              meta.sampleAmount,
+              liveSampleHourly,
               rule,
             );
-            const sampleAfter = Math.max(0, meta.sampleAmount - sampleDiscount);
+            const sampleAfter = Math.max(0, liveSampleHourly - sampleDiscount);
             const missingTargetSelection =
-              rule.enabled && !rule.apply_to_all && rule.target_ids.length === 0;
+              rule.scope === "fnb" &&
+              rule.enabled &&
+              !rule.apply_to_all &&
+              rule.target_ids.length === 0;
 
             return (
               <section
@@ -507,13 +524,13 @@ export default function DiscountManager({
                           )}
                         </div>
                         <p className="mt-0.5 text-xs text-muted">
-                          {rule.apply_to_all
-                            ? rule.scope === "fnb"
+                          {rule.scope !== "fnb"
+                            ? `Berlaku untuk semua meja ${meta.shortLabel}`
+                            : rule.apply_to_all
                               ? "Berlaku untuk semua menu F&B"
-                              : `Berlaku untuk semua meja ${meta.shortLabel}`
-                            : rule.target_ids.length > 0
-                              ? `Khusus ${rule.target_ids.length} ${rule.scope === "fnb" ? "menu F&B" : "meja"} terpilih`
-                              : `Belum memilih ${rule.scope === "fnb" ? "menu F&B" : "meja"} target`}
+                              : rule.target_ids.length > 0
+                                ? `Khusus ${rule.target_ids.length} menu F&B terpilih`
+                                : "Belum memilih menu F&B target"}
                         </p>
                       </div>
                     </div>
@@ -575,122 +592,107 @@ export default function DiscountManager({
 
                   {/* Body Setting Diskon */}
                   <div className="mt-4 space-y-4">
-                    {/* 1. Target Berlaku: Semua vs Meja/Menu Tertentu */}
-                    <div>
-                      <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
-                        Berlaku Untuk
-                      </span>
-                      <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-border bg-background p-1">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            patchRule(
-                              rule.id,
-                              isCustom,
-                              { apply_to_all: true },
-                              true,
-                            )
-                          }
-                          className={`min-h-[44px] rounded-lg px-3 text-xs font-bold transition ${
-                            rule.apply_to_all
-                              ? "bg-primary text-white"
-                              : "text-muted hover:text-foreground"
-                          }`}
-                        >
-                          {rule.scope === "fnb"
-                            ? "Semua Menu F&B"
-                            : `Semua ${meta.shortLabel}`}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            patchRule(
-                              rule.id,
-                              isCustom,
-                              { apply_to_all: false },
-                              true,
-                            )
-                          }
-                          className={`min-h-[44px] rounded-lg px-3 text-xs font-bold transition ${
-                            !rule.apply_to_all
-                              ? "bg-primary text-white"
-                              : "text-muted hover:text-foreground"
-                          }`}
-                        >
-                          {rule.scope === "fnb"
-                            ? "Menu F&B Tertentu"
-                            : "Meja Tertentu"}
-                        </button>
-                      </div>
+                    {/* 1. Target Berlaku (khusus F&B; untuk meja selalu berlaku untuk semua meja di kategori) */}
+                    {rule.scope === "fnb" && (
+                      <div>
+                        <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
+                          Berlaku Untuk
+                        </span>
+                        <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-border bg-background p-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              patchRule(
+                                rule.id,
+                                isCustom,
+                                { apply_to_all: true },
+                                true,
+                              )
+                            }
+                            className={`min-h-[48px] rounded-lg px-3 text-xs font-bold transition ${
+                              rule.apply_to_all
+                                ? "bg-primary text-white"
+                                : "text-muted hover:text-foreground"
+                            }`}
+                          >
+                            Semua Menu F&amp;B
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              patchRule(
+                                rule.id,
+                                isCustom,
+                                { apply_to_all: false },
+                                true,
+                              )
+                            }
+                            className={`min-h-[48px] rounded-lg px-3 text-xs font-bold transition ${
+                              !rule.apply_to_all
+                                ? "bg-primary text-white"
+                                : "text-muted hover:text-foreground"
+                            }`}
+                          >
+                            Menu F&amp;B Tertentu
+                          </button>
+                        </div>
 
-                      {/* Chip Pilihan Meja / Menu F&B Tertentu */}
-                      {!rule.apply_to_all && (
-                        <div className="mt-2.5 rounded-2xl border border-border bg-background p-3">
-                          {targets.length === 0 ? (
-                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-                              <span>
-                                Belum ada{" "}
-                                {rule.scope === "fnb"
-                                  ? "menu F&B"
-                                  : `meja ${meta.shortLabel}`}{" "}
-                                terdaftar.
-                              </span>
-                              <Link
-                                href={
-                                  rule.scope === "fnb"
-                                    ? "/kasir/fnb"
-                                    : "/kasir/pengaturan"
-                                }
-                                className="font-bold text-primary hover:underline"
-                              >
-                                Tambah sekarang →
-                              </Link>
-                            </div>
-                          ) : (
-                            <div className="flex flex-wrap gap-2">
-                              {targets.map((t) => {
-                                const selected = rule.target_ids.includes(t.id);
-                                return (
-                                  <button
-                                    key={t.id}
-                                    type="button"
-                                    onClick={() =>
-                                      toggleTargetId(rule, isCustom, t.id)
-                                    }
-                                    className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition active:scale-95 ${
-                                      selected
-                                        ? "border-primary bg-primary/20 text-foreground"
-                                        : "border-border bg-surface text-muted hover:border-primary/50 hover:text-foreground"
-                                    }`}
-                                  >
-                                    <span
-                                      className={`flex h-4 w-4 items-center justify-center rounded ${
+                        {!rule.apply_to_all && (
+                          <div className="mt-2.5 rounded-2xl border border-border bg-background p-3">
+                            {targets.length === 0 ? (
+                              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                                <span>Belum ada menu F&amp;B terdaftar.</span>
+                                <Link
+                                  href="/kasir/fnb"
+                                  className="font-bold text-primary hover:underline"
+                                >
+                                  Tambah sekarang →
+                                </Link>
+                              </div>
+                            ) : (
+                              <div className="flex flex-wrap gap-2">
+                                {targets.map((t) => {
+                                  const selected = rule.target_ids.includes(t.id);
+                                  return (
+                                    <button
+                                      key={t.id}
+                                      type="button"
+                                      onClick={() =>
+                                        toggleTargetId(rule, isCustom, t.id)
+                                      }
+                                      className={`inline-flex min-h-[48px] items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition active:scale-95 ${
                                         selected
-                                          ? "bg-primary text-white"
-                                          : "border border-border"
+                                          ? "border-primary bg-primary/20 text-foreground"
+                                          : "border-border bg-surface text-muted hover:border-primary/50 hover:text-foreground"
                                       }`}
                                     >
-                                      {selected && (
-                                        <Check className="h-3 w-3 stroke-[3]" />
-                                      )}
-                                    </span>
-                                    <span>{t.name}</span>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          )}
+                                      <span
+                                        className={`flex h-4 w-4 items-center justify-center rounded ${
+                                          selected
+                                            ? "bg-primary text-white"
+                                            : "border border-border"
+                                        }`}
+                                      >
+                                        {selected && (
+                                          <Check className="h-3 w-3 stroke-[3]" />
+                                        )}
+                                      </span>
+                                      <span>{t.name}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
 
-                          {missingTargetSelection && targets.length > 0 && (
-                            <p className="mt-2 text-[11px] font-semibold text-status-booked">
-                              Pilih minimal 1{" "}
-                              {rule.scope === "fnb" ? "menu F&B" : "meja"} di
-                              atas agar diskon aktif dipakai.
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                            {missingTargetSelection && targets.length > 0 && (
+                              <p className="mt-2 text-[11px] font-semibold text-status-booked">
+                                Pilih minimal 1 menu F&amp;B di atas agar diskon aktif dipakai.
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* 2. Nama / Label Promo (Opsional) */}
                     <div>
@@ -713,8 +715,8 @@ export default function DiscountManager({
                             false,
                           )
                         }
-                        placeholder="Contoh: Promo Happy Hour / Diskon Khusus Meja 1"
-                        className="min-h-[46px] w-full rounded-xl border border-border bg-background px-3.5 text-sm text-foreground placeholder:text-muted/60 focus:border-primary focus:outline-none"
+                        placeholder="Contoh: Promo Happy Hour / Diskon Paket Jam"
+                        className="min-h-[48px] w-full rounded-xl border border-border bg-background px-3.5 text-sm text-foreground placeholder:text-muted/60 focus:border-primary focus:outline-none"
                       />
                     </div>
 
@@ -735,7 +737,7 @@ export default function DiscountManager({
                               ? [
                                   {
                                     id: "duration_percent" as const,
-                                    label: "Per Jam (1–5j)",
+                                    label: "Per Jam & Custom",
                                   },
                                 ]
                               : []),
@@ -797,31 +799,30 @@ export default function DiscountManager({
                       <div className="space-y-3 rounded-2xl border border-border bg-background p-3.5">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <span className="text-xs font-bold uppercase tracking-wider text-muted">
-                            Custom Diskon Per Durasi (1–5 Jam)
+                            Diskon Per Jam &amp; Custom
                           </span>
                           <span className="text-[11px] text-muted">
-                            6–10 jam ikut 5 Jam+
+                            Custom berlaku untuk 6 jam ke atas
                           </span>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-                          {DURATION_TIER_HOURS.map((hour) => {
-                            const key = String(hour) as DurationTierKey;
+                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                          {DURATION_TIER_KEYS.map((key) => {
                             const pctVal = rule.duration_tiers[key] ?? 0;
                             return (
                               <div
-                                key={hour}
+                                key={key}
                                 className="rounded-xl border border-border bg-surface p-2.5"
                               >
                                 <label
-                                  htmlFor={`tier-${rule.id}-${hour}`}
+                                  htmlFor={`tier-${rule.id}-${key}`}
                                   className="block text-[11px] font-bold uppercase tracking-wide text-muted"
                                 >
-                                  {hour === 5 ? "5 Jam+" : `${hour} Jam`}
+                                  {getTierDisplayLabel(key)}
                                 </label>
                                 <div className="mt-1.5 flex items-center gap-1">
                                   <input
-                                    id={`tier-${rule.id}-${hour}`}
+                                    id={`tier-${rule.id}-${key}`}
                                     type="text"
                                     inputMode="numeric"
                                     pattern="[0-9]*"
@@ -1001,22 +1002,22 @@ export default function DiscountManager({
                 {rule.type === "duration_percent" && rule.scope !== "fnb" ? (
                   <div className="mt-4 rounded-2xl border border-border bg-background p-3.5">
                     <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-muted">
-                      Simulasi Harga {meta.shortLabel} ({formatRupiah(meta.sampleAmount)}/jam)
+                      Simulasi Harga {meta.shortLabel} ({formatRupiah(liveSampleHourly)}/jam)
                     </p>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-                      {DURATION_TIER_HOURS.map((h) => {
-                        const key = String(h) as DurationTierKey;
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {DURATION_TIER_KEYS.map((key) => {
+                        const simHours = getTierSimulationHours(key);
                         const pct = rule.duration_tiers[key] ?? 0;
-                        const normal = meta.sampleAmount * h;
-                        const disc = calculateRuleDiscount(normal, rule, h);
+                        const normal = liveSampleHourly * simHours;
+                        const disc = calculateRuleDiscount(normal, rule, simHours);
                         const after = Math.max(0, normal - disc);
                         return (
                           <div
-                            key={h}
+                            key={key}
                             className="rounded-xl border border-border/70 bg-surface px-2.5 py-2 text-center"
                           >
                             <p className="text-[10px] font-bold uppercase text-muted">
-                              {h === 5 ? "5 Jam+" : `${h} Jam`}{" "}
+                              {key === "custom" ? "Custom (6j)" : `${key} Jam`}{" "}
                               {pct > 0 && (
                                 <span className="text-status-available">
                                   (-{pct}%)
@@ -1042,7 +1043,7 @@ export default function DiscountManager({
                     <div className="flex items-baseline gap-2">
                       {sampleDiscount > 0 && (
                         <span className="tabular-money text-xs text-muted line-through">
-                          {formatRupiah(meta.sampleAmount)}
+                          {formatRupiah(liveSampleHourly)}
                         </span>
                       )}
                       <span className="tabular-money font-heading text-xl font-bold text-primary">
@@ -1091,13 +1092,19 @@ export default function DiscountManager({
                       type="button"
                       onClick={() => {
                         setNewScope(sc);
-                        if (sc === "fnb" && newType === "duration_percent") {
-                          setNewType("percent");
+                        if (sc === "fnb") {
+                          if (newType === "duration_percent") {
+                            setNewType("percent");
+                          }
+                          const list = getTargetsForScope("fnb");
+                          setNewApplyAll(true);
+                          setNewTargetIds(list[0] ? [list[0].id] : []);
+                        } else {
+                          setNewApplyAll(true);
+                          setNewTargetIds([]);
                         }
-                        const list = getTargetsForScope(sc);
-                        setNewTargetIds(list[0] ? [list[0].id] : []);
                       }}
-                      className={`min-h-[46px] rounded-xl border text-xs font-bold transition ${
+                      className={`min-h-[48px] rounded-xl border text-xs font-bold transition ${
                         newScope === sc
                           ? "border-primary bg-primary text-white"
                           : "border-border bg-background text-muted hover:text-foreground"
@@ -1122,75 +1129,77 @@ export default function DiscountManager({
                   maxLength={60}
                   value={newLabel}
                   onChange={(e) => setNewLabel(e.target.value)}
-                  placeholder="Contoh: Promo Meja 1 & 2 / Diskon Es Teh"
+                  placeholder="Contoh: Promo Happy Hour / Diskon Paket Jam"
                   className="min-h-[48px] w-full rounded-xl border border-border bg-background px-4 text-sm text-foreground focus:border-primary focus:outline-none"
                 />
               </div>
 
-              <div>
-                <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
-                  Target Berlaku
-                </span>
-                <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-border bg-background p-1">
-                  <button
-                    type="button"
-                    onClick={() => setNewApplyAll(false)}
-                    className={`min-h-[44px] rounded-lg text-xs font-bold ${
-                      !newApplyAll
-                        ? "bg-primary text-white"
-                        : "text-muted hover:text-foreground"
-                    }`}
-                  >
-                    {newScope === "fnb" ? "Menu Tertentu" : "Meja Tertentu"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewApplyAll(true)}
-                    className={`min-h-[44px] rounded-lg text-xs font-bold ${
-                      newApplyAll
-                        ? "bg-primary text-white"
-                        : "text-muted hover:text-foreground"
-                    }`}
-                  >
-                    Semua {SCOPE_META[newScope].shortLabel}
-                  </button>
-                </div>
-
-                {!newApplyAll && (
-                  <div className="mt-2.5 flex flex-wrap gap-2 rounded-2xl border border-border bg-background p-3">
-                    {modalTargets.length === 0 ? (
-                      <p className="text-xs text-muted">
-                        Belum ada item di kategori ini.
-                      </p>
-                    ) : (
-                      modalTargets.map((t) => {
-                        const checked = newTargetIds.includes(t.id);
-                        return (
-                          <button
-                            key={t.id}
-                            type="button"
-                            onClick={() =>
-                              setNewTargetIds((prev) =>
-                                checked
-                                  ? prev.filter((id) => id !== t.id)
-                                  : [...prev, t.id],
-                              )
-                            }
-                            className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition ${
-                              checked
-                                ? "border-primary bg-primary/20 text-foreground"
-                                : "border-border bg-surface text-muted"
-                            }`}
-                          >
-                            {checked && <Check className="h-3.5 w-3.5 text-primary" />}
-                            <span>{t.name}</span>
-                          </button>
-                        );
-                      })
-                    )}
+              {newScope === "fnb" && (
+                <div>
+                  <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
+                    Target Berlaku
+                  </span>
+                  <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-border bg-background p-1">
+                    <button
+                      type="button"
+                      onClick={() => setNewApplyAll(true)}
+                      className={`min-h-[48px] rounded-lg text-xs font-bold ${
+                        newApplyAll
+                          ? "bg-primary text-white"
+                          : "text-muted hover:text-foreground"
+                      }`}
+                    >
+                      Semua Menu F&amp;B
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewApplyAll(false)}
+                      className={`min-h-[48px] rounded-lg text-xs font-bold ${
+                        !newApplyAll
+                          ? "bg-primary text-white"
+                          : "text-muted hover:text-foreground"
+                      }`}
+                    >
+                      Menu Tertentu
+                    </button>
                   </div>
-                )}
-              </div>
+
+                  {!newApplyAll && (
+                    <div className="mt-2.5 flex flex-wrap gap-2 rounded-2xl border border-border bg-background p-3">
+                      {modalTargets.length === 0 ? (
+                        <p className="text-xs text-muted">
+                          Belum ada menu F&amp;B terdaftar.
+                        </p>
+                      ) : (
+                        modalTargets.map((t) => {
+                          const checked = newTargetIds.includes(t.id);
+                          return (
+                            <button
+                              key={t.id}
+                              type="button"
+                              onClick={() =>
+                                setNewTargetIds((prev) =>
+                                  checked
+                                    ? prev.filter((id) => id !== t.id)
+                                    : [...prev, t.id],
+                                )
+                              }
+                              className={`inline-flex min-h-[48px] items-center gap-1.5 rounded-xl border px-3 text-xs font-bold transition ${
+                                checked
+                                  ? "border-primary bg-primary/20 text-foreground"
+                                  : "border-border bg-surface text-muted"
+                              }`}
+                            >
+                              {checked && <Check className="h-3.5 w-3.5 text-primary" />}
+                              <span>{t.name}</span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div>
                 <span className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-muted">
@@ -1207,7 +1216,7 @@ export default function DiscountManager({
                       setNewType("percent");
                       setNewValue("10");
                     }}
-                    className={`min-h-[44px] rounded-lg text-xs font-bold ${
+                    className={`min-h-[48px] rounded-lg text-xs font-bold ${
                       newType === "percent"
                         ? "bg-primary text-white"
                         : "text-muted hover:text-foreground"
@@ -1219,13 +1228,13 @@ export default function DiscountManager({
                     <button
                       type="button"
                       onClick={() => setNewType("duration_percent")}
-                      className={`min-h-[44px] rounded-lg text-xs font-bold ${
+                      className={`min-h-[48px] rounded-lg text-xs font-bold ${
                         newType === "duration_percent"
                           ? "bg-primary text-white"
                           : "text-muted hover:text-foreground"
                       }`}
                     >
-                      Per Jam (1–5j)
+                      Per Jam &amp; Custom
                     </button>
                   )}
                   <button
@@ -1234,7 +1243,7 @@ export default function DiscountManager({
                       setNewType("nominal");
                       setNewValue("5000");
                     }}
-                    className={`min-h-[44px] rounded-lg text-xs font-bold ${
+                    className={`min-h-[48px] rounded-lg text-xs font-bold ${
                       newType === "nominal"
                         ? "bg-primary text-white"
                         : "text-muted hover:text-foreground"
@@ -1249,30 +1258,29 @@ export default function DiscountManager({
                 <div className="space-y-2.5 rounded-2xl border border-border bg-background p-3.5">
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-bold uppercase tracking-wider text-muted">
-                      Diskon Per Durasi (1–5 Jam)
+                      Diskon Per Jam &amp; Custom
                     </span>
                     <span className="text-[11px] text-muted">
-                      6–10 jam ikut 5 Jam+
+                      Custom untuk 6 jam ke atas
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-                    {DURATION_TIER_HOURS.map((hour) => {
-                      const key = String(hour) as DurationTierKey;
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {DURATION_TIER_KEYS.map((key) => {
                       const pctVal = newDurationTiers[key] ?? 0;
                       return (
                         <div
-                          key={hour}
+                          key={key}
                           className="rounded-xl border border-border bg-surface p-2"
                         >
                           <label
-                            htmlFor={`new-tier-${hour}`}
+                            htmlFor={`new-tier-${key}`}
                             className="block text-[11px] font-bold uppercase text-muted"
                           >
-                            {hour === 5 ? "5 Jam+" : `${hour} Jam`}
+                            {getTierDisplayLabel(key)}
                           </label>
                           <div className="mt-1 flex items-center gap-1">
                             <input
-                              id={`new-tier-${hour}`}
+                              id={`new-tier-${key}`}
                               type="text"
                               inputMode="numeric"
                               pattern="[0-9]*"
@@ -1323,7 +1331,9 @@ export default function DiscountManager({
               <button
                 type="submit"
                 disabled={
-                  (!newApplyAll && newTargetIds.length === 0) ||
+                  (newScope === "fnb" &&
+                    !newApplyAll &&
+                    newTargetIds.length === 0) ||
                   (newType === "duration_percent" &&
                     newScope !== "fnb" &&
                     !hasAnyDurationTierDiscount(newDurationTiers))

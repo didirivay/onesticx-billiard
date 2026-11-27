@@ -6,7 +6,6 @@ import {
   formatBookingConflictMessage,
 } from "@/lib/booking-conflict";
 import {
-  MAX_BOOKING_DURATION_HOURS,
   MIN_BOOKING_DURATION_HOURS,
   getWibNow,
   parseStrictDurationHours,
@@ -56,7 +55,7 @@ export async function POST(request: Request) {
       ? parseStrictDurationHours(
           body.durationHours,
           MIN_BOOKING_DURATION_HOURS,
-          MAX_BOOKING_DURATION_HOURS,
+          999,
         )
       : 0;
   let bookingTotalPrice: number | null = null;
@@ -122,12 +121,11 @@ export async function POST(request: Request) {
     (durationHours === null ||
       !Number.isInteger(durationHours) ||
       durationHours < MIN_BOOKING_DURATION_HOURS ||
-      durationHours > (bookingId ? 12 : MAX_BOOKING_DURATION_HOURS))
+      durationHours > 999)
   ) {
     return NextResponse.json(
       {
-        error:
-          "Durasi paket jam harus berupa bilangan asli antara 1 sampai 10 jam (angka bulat tanpa huruf).",
+        error: "Durasi paket jam harus berupa angka bulat minimal 1 jam.",
       },
       { status: 400 },
     );

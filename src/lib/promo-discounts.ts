@@ -4,7 +4,8 @@ export type PromoScope = "indoor" | "outdoor" | "high_table" | "fnb";
 export type DiscountRuleType = "percent" | "nominal" | "duration_percent";
 
 export const DURATION_TIER_HOURS = [1, 2, 3, 4, 5] as const;
-export type DurationTierKey = "1" | "2" | "3" | "4" | "5";
+export const DURATION_TIER_KEYS = ["1", "2", "3", "4", "5", "custom"] as const;
+export type DurationTierKey = (typeof DURATION_TIER_KEYS)[number];
 export type DurationDiscountTiers = Record<DurationTierKey, number>;
 
 export interface CategoryDiscountRule {
@@ -36,6 +37,7 @@ export function makeDefaultDurationTiers(): DurationDiscountTiers {
     "3": 0,
     "4": 0,
     "5": 0,
+    custom: 0,
   };
 }
 
@@ -68,8 +70,7 @@ function sanitizeDurationTiers(input: unknown): DurationDiscountTiers {
   if (!input || typeof input !== "object") return result;
   const raw = input as Record<string, unknown>;
 
-  for (const h of DURATION_TIER_HOURS) {
-    const key = String(h) as DurationTierKey;
+  for (const key of DURATION_TIER_KEYS) {
     const rawVal = raw[key];
     const num =
       typeof rawVal === "number"
@@ -127,18 +128,27 @@ function sanitizeRule(
   const label =
     typeof raw.label === "string" ? raw.label.trim().slice(0, 60) : "";
 
+  // Aturan diskon meja selalu berlaku untuk semua meja pada kategori tersebut
   const applyToAll =
-    typeof raw.apply_to_all === "boolean" ? raw.apply_to_all : true;
+    scope === "fnb"
+      ? typeof raw.apply_to_all === "boolean"
+        ? raw.apply_to_all
+        : true
+      : true;
 
-  const targetIds = Array.isArray(raw.target_ids)
-    ? [
-        ...new Set(
-          raw.target_ids
-            .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
-            .map((x) => x.trim()),
-        ),
-      ].slice(0, 100)
-    : [];
+  const targetIds =
+    scope === "fnb" && Array.isArray(raw.target_ids)
+      ? [
+          ...new Set(
+            raw.target_ids
+              .filter(
+                (x): x is string =>
+                  typeof x === "string" && x.trim().length > 0,
+              )
+              .map((x) => x.trim()),
+          ),
+        ].slice(0, 100)
+      : [];
 
   return {
     id,
@@ -190,7 +200,9 @@ export function sanitizePromoDiscountsPayload(
 }
 
 /**
- * Ambil persentase diskon untuk durasi tertentu (1..5 jam; durasi 6–10 jam mengikuti tier 5 jam).
+ * Ambil persentase diskon untuk durasi tertentu:
+ * - 1..5 jam mengikuti tier "1".."5"
+ * - 6 jam ke atas (durasi custom) mengikuti tier "custom"
  */
 export function getDurationTierPercent(
   tiers: DurationDiscountTiers | undefined,
@@ -201,8 +213,8 @@ export function getDurationTierPercent(
   }
   const wholeHours = Math.floor(durationHours);
   if (wholeHours < 1) return 0;
-  const clamped = Math.min(5, wholeHours);
-  const key = String(clamped) as DurationTierKey;
+  const key: DurationTierKey =
+    wholeHours >= 6 ? "custom" : (String(wholeHours) as DurationTierKey);
   const raw = tiers[key] ?? 0;
   return Number.isFinite(raw) && raw > 0 ? Math.min(100, Math.round(raw)) : 0;
 }
@@ -211,9 +223,7 @@ export function hasAnyDurationTierDiscount(
   tiers: DurationDiscountTiers | undefined,
 ): boolean {
   if (!tiers) return false;
-  return DURATION_TIER_HOURS.some(
-    (h) => (tiers[String(h) as DurationTierKey] ?? 0) > 0,
-  );
+  return DURATION_TIER_KEYS.some((key) => (tiers[key] ?? 0) > 0);
 }
 
 export function getMaxDurationTierPercent(
@@ -221,8 +231,8 @@ export function getMaxDurationTierPercent(
 ): number {
   if (!tiers) return 0;
   let max = 0;
-  for (const h of DURATION_TIER_HOURS) {
-    const val = tiers[String(h) as DurationTierKey] ?? 0;
+  for (const key of DURATION_TIER_KEYS) {
+    const val = tiers[key] ?? 0;
     if (val > max) max = val;
   }
   return Math.min(100, Math.max(0, Math.round(max)));
@@ -435,9 +445,9 @@ export function formatPromoShortTag(
       const pct = getDurationTierPercent(rule.duration_tiers, durationHours);
       return pct > 0 ? `Diskon ${pct}%` : "";
     }
-    const nonZero = DURATION_TIER_HOURS.map(
-      (h) => rule.duration_tiers[String(h) as DurationTierKey] ?? 0,
-    ).filter((v) => v > 0);
+    const nonZero = DURATION_TIER_KEYS.map((key) => rule.duration_tiers[key] ?? 0).filter(
+      (v) => v > 0,
+    );
     if (nonZero.length === 0) return "";
     const minPct = Math.min(...nonZero);
     const maxPct = Math.max(...nonZero);

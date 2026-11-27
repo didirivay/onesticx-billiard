@@ -20,7 +20,6 @@ import {
 } from "lucide-react";
 import { getBrowserSupabaseClient } from "@/lib/supabase/client";
 import {
-  MAX_BOOKING_DURATION_HOURS,
   MIN_BOOKING_DURATION_HOURS,
   OPERATIONAL_START_SLOTS,
   PRESET_DURATION_OPTIONS,
@@ -498,8 +497,7 @@ export default function CustomerPortal({
     if (!/^\d+$/.test(trimmed)) {
       return {
         parsedHours: null,
-        error:
-          "Durasi hanya boleh diisi angka bulat 1–10 (tidak boleh huruf atau simbol).",
+        error: "Durasi hanya boleh diisi angka bulat.",
         valid: false,
       };
     }
@@ -507,7 +505,7 @@ export default function CustomerPortal({
     if (trimmed.startsWith("0")) {
       return {
         parsedHours: null,
-        error: "Durasi harus bilangan asli antara 1 sampai 10 jam (tidak boleh 0).",
+        error: "Durasi harus angka bulat minimal 1 jam.",
         valid: false,
       };
     }
@@ -515,12 +513,11 @@ export default function CustomerPortal({
     const parsed = parseStrictDurationHours(
       trimmed,
       MIN_BOOKING_DURATION_HOURS,
-      MAX_BOOKING_DURATION_HOURS,
     );
     if (parsed === null) {
       return {
         parsedHours: null,
-        error: `Durasi harus bilangan asli antara ${MIN_BOOKING_DURATION_HOURS} sampai ${MAX_BOOKING_DURATION_HOURS} jam.`,
+        error: "Durasi harus angka bulat minimal 1 jam.",
         valid: false,
       };
     }
@@ -604,9 +601,7 @@ export default function CustomerPortal({
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key.length === 1 && !/^\d$/.test(e.key)) {
       e.preventDefault();
-      setCustomInputHint(
-        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
-      );
+      setCustomInputHint("Durasi hanya boleh diisi angka bulat.");
     }
   };
 
@@ -621,12 +616,10 @@ export default function CustomerPortal({
       return;
     }
     if (/[^0-9]/.test(raw)) {
-      setCustomInputHint(
-        "Hanya boleh memasukkan bilangan asli 1–10 (tidak boleh huruf atau simbol).",
-      );
+      setCustomInputHint("Durasi hanya boleh diisi angka bulat.");
       return;
     }
-    if (raw.length > 2) return;
+    if (raw.length > 3) return;
     setCustomInputHint(null);
     setCustomDurationInput(raw);
     setFormError(null);
@@ -669,7 +662,7 @@ export default function CustomerPortal({
     if (effectiveDurationHours === null) {
       setFormError(
         customDurationState.error ??
-          "Masukkan durasi bermain berupa bilangan asli antara 1 sampai 10 jam (tanpa huruf).",
+          "Masukkan durasi bermain berupa angka bulat minimal 1 jam.",
       );
       return;
     }
@@ -1280,28 +1273,62 @@ export default function CustomerPortal({
                   );
                 })}
 
-                <button
-                  type="button"
-                  disabled={durationAvailability.maxContiguous < 1}
-                  onClick={() => {
-                    setIsCustomDuration(true);
-                    setCustomInputHint(null);
-                    setFormError(null);
-                    window.requestAnimationFrame(() => {
-                      customDurationInputRef.current?.focus();
-                      customDurationInputRef.current?.select();
-                    });
-                  }}
-                  className={`min-h-[48px] rounded-xl border text-sm font-semibold transition ${
-                    isCustomDuration
-                      ? "border-primary bg-primary text-white shadow-md shadow-primary/25"
-                      : durationAvailability.maxContiguous < 1
-                        ? "cursor-not-allowed border-border/50 bg-background/40 text-muted/40"
-                        : "border-border bg-background text-foreground hover:border-primary/60"
-                  }`}
-                >
-                  Custom
-                </button>
+                {(() => {
+                  const customPromo = selectedTable
+                    ? getBestTablePromoForTable(
+                        initialPromoDiscounts,
+                        selectedTable.id,
+                        selectedTable.category,
+                        selectedTable.hourly_rate * 6,
+                        6,
+                      )
+                    : { rule: null, discountAmount: 0 };
+                  const customPromoLabel =
+                    customPromo.rule &&
+                    customPromo.rule.type === "duration_percent" &&
+                    customPromo.discountAmount > 0
+                      ? formatPromoShortTag(customPromo.rule, 6).replace(
+                          "Diskon ",
+                          "-",
+                        )
+                      : "";
+                  const customDisabled = durationAvailability.maxContiguous < 1;
+                  return (
+                    <button
+                      type="button"
+                      disabled={customDisabled}
+                      onClick={() => {
+                        setIsCustomDuration(true);
+                        setCustomInputHint(null);
+                        setFormError(null);
+                        window.requestAnimationFrame(() => {
+                          customDurationInputRef.current?.focus();
+                          customDurationInputRef.current?.select();
+                        });
+                      }}
+                      className={`flex min-h-[48px] flex-col items-center justify-center rounded-xl border px-1 text-sm font-semibold transition ${
+                        isCustomDuration
+                          ? "border-primary bg-primary text-white shadow-md shadow-primary/25"
+                          : customDisabled
+                            ? "cursor-not-allowed border-border/50 bg-background/40 text-muted/40"
+                            : "border-border bg-background text-foreground hover:border-primary/60"
+                      }`}
+                    >
+                      <span>Custom</span>
+                      {customPromoLabel && !customDisabled && (
+                        <span
+                          className={`text-[10px] font-bold ${
+                            isCustomDuration
+                              ? "text-white/90"
+                              : "text-status-available"
+                          }`}
+                        >
+                          {customPromoLabel}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })()}
               </div>
 
               {isCustomDuration && (
@@ -1310,7 +1337,7 @@ export default function CustomerPortal({
                     htmlFor="booking-custom-duration"
                     className="mb-2 flex items-center justify-between gap-2 text-xs font-semibold text-foreground"
                   >
-                    <span>Masukkan Durasi Custom (1–10 Jam)</span>
+                    <span>Masukkan Durasi</span>
                     <span className="tabular-nums text-[11px] font-medium text-muted">
                       Tersedia maks. {durationAvailability.maxContiguous} jam
                     </span>
@@ -1323,11 +1350,11 @@ export default function CustomerPortal({
                       inputMode="numeric"
                       pattern="[0-9]*"
                       autoComplete="off"
-                      maxLength={2}
+                      maxLength={3}
                       value={customDurationInput}
                       onKeyDown={handleCustomDurationKeyDown}
                       onChange={handleCustomDurationChange}
-                      placeholder="Contoh: 6, 7, 8, 9, atau 10"
+                      placeholder="Contoh: 6"
                       className={`tabular-nums min-h-[48px] flex-1 rounded-xl border bg-surface px-3.5 text-sm font-semibold text-foreground placeholder:font-normal placeholder:text-muted/70 focus:outline-none ${
                         customInputHint || customDurationState.error
                           ? "border-status-occupied focus:border-status-occupied"
@@ -1338,13 +1365,9 @@ export default function CustomerPortal({
                       Jam
                     </span>
                   </div>
-                  {customInputHint || customDurationState.error ? (
+                  {(customInputHint || customDurationState.error) && (
                     <p className="mt-2 text-xs font-semibold text-status-occupied">
                       {customInputHint ?? customDurationState.error}
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-[11px] text-muted">
-                      Isi bilangan asli 1 sampai 10 (hanya angka bulat, tanpa huruf).
                     </p>
                   )}
                 </div>
@@ -1412,7 +1435,7 @@ export default function CustomerPortal({
                 <span className="tabular-timer font-semibold text-foreground">
                   {effectiveDurationHours !== null && endTimeHHmm
                     ? `${formatShortIndonesianDate(bookingDate)} • ${startTime} - ${endTimeHHmm} WIB (${effectiveDurationHours} Jam)`
-                    : `${formatShortIndonesianDate(bookingDate)} • Mulai ${startTime} WIB (Isi durasi 1–10 jam)`}
+                    : `${formatShortIndonesianDate(bookingDate)} • Mulai ${startTime} WIB (Masukkan durasi)`}
                 </span>
               </div>
               {bookingPromoDiscount > 0 && selectedTablePromo && (
